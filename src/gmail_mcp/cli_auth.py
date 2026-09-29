@@ -24,10 +24,16 @@ AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
 PROFILE_URL = "https://gmail.googleapis.com/gmail/v1/users/me/profile"
 
+# Served the moment the authorization code arrives, which is BEFORE the token
+# exchange and the identity check. It must therefore not claim success: the run
+# can still fail afterwards, and a page promising a token that never appears
+# sends people back to a terminal they have been told to stop reading.
 SUCCESS_PAGE = b"""<!doctype html><meta charset="utf-8">
-<title>Authorized</title>
+<title>Authorization received</title>
 <body style="font-family:system-ui;padding:3rem;max-width:32rem">
-<h2>Authorized.</h2><p>Return to your terminal &mdash; the refresh token is printed there.</p>
+<h2>Authorization received.</h2>
+<p>Return to your terminal to see whether it succeeded &mdash; there are still
+two checks to run, and the refresh token is only printed if both pass.</p>
 </body>"""
 
 
@@ -129,16 +135,56 @@ def authorize(account: str, client_id: str, client_secret: str) -> str:
             PROFILE_URL,
             headers={"Authorization": f"Bearer {payload['access_token']}"},
         )
-        actual = profile.json().get("emailAddress", "") if profile.status_code == 200 else ""
+
+        # A failed check and a wrong account are different problems and must not
+        # share an error message. Reporting "you signed in as the wrong account"
+        # when the truth is "the API is switched off" sends people hunting the
+        # wrong thing -- which is exactly what happened the first time this ran.
+        if profile.status_code != 200:
+            raise AuthError(_describe_profile_failure(profile))
+
+        actual = profile.json().get("emailAddress", "")
 
         if actual.lower() != account.lower():
             raise AuthError(
-                f"You asked to authorize {account} but signed in as {actual or 'an unknown account'}. "
+                f"You asked to authorize {account} but signed in as {actual or 'an unnamed account'}. "
                 f"Discarding this token — run again and pick the right account."
             )
 
     return refresh_token
 
+
+def _describe_profile_failure(response: httpx.Response) -> str:
+    """Explain why the post-consent identity check could not be made."""
+    try:
+        error = response.json().get("error", {})
+    except ValueError:
+        error = {}
+
+    reason = ""
+    for detail in error.get("errors", []) or []:
+        if detail.get("reason"):
+            reason = detail["reason"]
+            break
+
+    message = error.get("message", f"HTTP {response.status_code}")
+    text = (
+        f"Consent succeeded, but the mailbox could not be verified: {message}. "
+        f"Discarding this token."
+    )
+
+    if reason == "accessNotConfigured" or "has not been used" in message or "is disabled" in message:
+        text += (
+            "\n\nThe Gmail API is not enabled on this Google Cloud project. "
+            "Enable it at APIs & Services -> Library -> Gmail API, wait a minute for "
+            "it to propagate, then run this command again."
+        )
+    elif response.status_code == 403:
+        text += (
+            "\n\nA 403 here usually means the Gmail API is not enabled on the project, "
+            "or the consent screen does not list the gmail.readonly scope."
+        )
+    return text
 
 def run() -> None:
     if len(sys.argv) != 2:

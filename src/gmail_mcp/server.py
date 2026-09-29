@@ -298,7 +298,7 @@ def run() -> None:
     """Console entry point. Configuration and identity failures exit non-zero."""
     try:
         asyncio.run(_serve())
-    except (ConfigError, AuthError) as exc:
+    except (ConfigError, AuthError, GmailError) as exc:
         print(f"gmail-mcp: {exc}", file=sys.stderr)
         sys.exit(1)
     except KeyboardInterrupt:
