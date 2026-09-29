@@ -1,0 +1,29 @@
+[project]
+name = "gmail-mcp"
+version = "0.1.0"
+description = "MCP server giving an AI agent read-only access to one Gmail mailbox per process."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "mcp>=1.2.0",
+    "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
+
+[project.scripts]
+gmail-mcp = "gmail_mcp.server:run"
+gmail-mcp-auth = "gmail_mcp.cli_auth:run"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/gmail_mcp"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

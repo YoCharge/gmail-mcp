@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main, staging]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+      - run: uv venv
+      - run: uv pip install -e ".[dev]"
+      - run: uv run pytest -q
+
+  no-internal-addresses:
+    # This repository is intended to be published. Example addresses only: a real
+    # internal address committed once remains in git history even after removal.
+    # Matches address and domain forms, not the GitHub org in a clone URL.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fail on internal addresses
+        run: |
+          pattern='[[:alnum:]._%+-]+@[[:alnum:].-]+\.(com|in|net|org)'
+          found=$(grep -rnoiE "$pattern" --exclude-dir=.git . \
+                  | grep -viE '@(example|test|localhost)\.' || true)
+          if [ -n "$found" ]; then
+            echo "$found"
+            echo
+            echo "Non-example email address found. Use example.com addresses only."
+            exit 1
+          fi
+          echo "Clean — every address is an example address."

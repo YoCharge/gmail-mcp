@@ -1,0 +1,197 @@
+"""A thin Gmail REST client.
+
+Only the read surface is implemented. There is deliberately no send, reply, draft,
+label or trash call here — and the gmail.readonly token this client carries could not
+perform them anyway.
+"""
+
+from __future__ import annotations
+
+import base64
+from typing import Any, Iterator
+
+import httpx
+
+API_ROOT = "https://gmail.googleapis.com/gmail/v1/users/me"
+
+DEFAULT_TIMEOUT = 30.0
+
+
+class GmailError(RuntimeError):
+    """The Gmail API returned an error."""
+
+
+class GmailClient:
+    def __init__(self, credentials, client: httpx.Client | None = None) -> None:
+        self._credentials = credentials
+        self._http = client or httpx.Client(timeout=DEFAULT_TIMEOUT)
+
+    # -- transport ---------------------------------------------------------
+
+    def _get(self, path: str, params: dict[str, Any] | None = None) -> dict:
+        """GET with a single retry after a forced token refresh.
+
+        A 401 here is nearly always a token that expired mid-session rather than a
+        genuine authorization failure, so one refresh-and-retry is worth it. Retrying
+        more than once would just hammer the endpoint with the same bad credential.
+        """
+        url = f"{API_ROOT}{path}"
+
+        token = self._credentials.access_token(self._http)
+        response = self._http.get(url, params=params, headers=_bearer(token))
+
+        if response.status_code == 401:
+            token = self._credentials.refresh(self._http)
+            response = self._http.get(url, params=params, headers=_bearer(token))
+
+        if response.status_code >= 400:
+            raise GmailError(_describe_failure(response))
+
+        return response.json()
+
+    # -- read surface ------------------------------------------------------
+
+    def get_profile(self) -> dict:
+        """Identity of the mailbox this token actually opens. Used for the startup assertion."""
+        return self._get("/profile")
+
+    def list_threads(self, query: str, max_results: int = 20) -> list[dict]:
+        payload = self._get(
+            "/threads",
+            params={"q": query, "maxResults": max(1, min(max_results, 500))},
+        )
+        return payload.get("threads", [])
+
+    def get_thread(self, thread_id: str) -> dict:
+        return self._get(f"/threads/{thread_id}", params={"format": "full"})
+
+    def get_message(self, message_id: str) -> dict:
+        return self._get(f"/messages/{message_id}", params={"format": "full"})
+
+    def list_labels(self) -> list[dict]:
+        return self._get("/labels").get("labels", [])
+
+    def get_attachment(self, message_id: str, attachment_id: str) -> bytes:
+        payload = self._get(f"/messages/{message_id}/attachments/{attachment_id}")
+        return decode_base64url_bytes(payload.get("data", ""))
+
+
+def _bearer(token: str) -> dict[str, str]:
+    return {"Authorization": f"Bearer {token}"}
+
+
+def _describe_failure(response: httpx.Response) -> str:
+    try:
+        body = response.json()
+    except ValueError:
+        return f"HTTP {response.status_code}"
+
+    error = body.get("error", {})
+    message = error.get("message", f"HTTP {response.status_code}")
+    return f"{response.status_code}: {message}"
+
+
+# -- payload helpers -------------------------------------------------------
+#
+# Gmail nests message bodies in a parts tree and base64url-encodes every leaf.
+# These are pure functions so they can be tested against captured payloads without
+# any network involved.
+
+
+def decode_base64url(data: str) -> str:
+    return decode_base64url_bytes(data).decode("utf-8", errors="replace")
+
+
+def decode_base64url_bytes(data: str) -> bytes:
+    if not data:
+        return b""
+    # Gmail omits padding; base64 requires the length to be a multiple of four.
+    padding = "=" * (-len(data) % 4)
+    return base64.urlsafe_b64decode(data + padding)
+
+
+def header(message: dict, name: str) -> str:
+    """Case-insensitive header lookup. Returns '' when absent."""
+    wanted = name.lower()
+    for entry in message.get("payload", {}).get("headers", []):
+        if entry.get("name", "").lower() == wanted:
+            return entry.get("value", "")
+    return ""
+
+
+def walk_parts(payload: dict) -> Iterator[dict]:
+    """Depth-first walk of the MIME tree, including the root."""
+    if not payload:
+        return
+    yield payload
+    for part in payload.get("parts", []) or []:
+        yield from walk_parts(part)
+
+
+def extract_body(message: dict) -> str:
+    """Best-effort plain text for a message.
+
+    Prefers text/plain. Falls back to text/html only when there is no plain part,
+    because multipart/alternative messages carry both and the HTML copy is far
+    noisier to read.
+    """
+    payload = message.get("payload", {})
+
+    plain: list[str] = []
+    html: list[str] = []
+
+    for part in walk_parts(payload):
+        mime = part.get("mimeType", "")
+        data = part.get("body", {}).get("data")
+        if not data:
+            continue
+        if mime == "text/plain":
+            plain.append(decode_base64url(data))
+        elif mime == "text/html":
+            html.append(decode_base64url(data))
+
+    if plain:
+        return "\n".join(plain).strip()
+    if html:
+        return "\n".join(html).strip()
+    return ""
+
+
+def list_attachments(message: dict) -> list[dict]:
+    """Attachment parts with the ids download_attachment needs."""
+    found = []
+    for part in walk_parts(message.get("payload", {})):
+        body = part.get("body", {})
+        attachment_id = body.get("attachmentId")
+        if not attachment_id:
+            continue
+        found.append(
+            {
+                "attachment_id": attachment_id,
+                "filename": part.get("filename") or "unnamed",
+                "mime_type": part.get("mimeType", "application/octet-stream"),
+                "size": body.get("size", 0),
+            }
+        )
+    return found
+
+
+def summarise_message(message: dict, include_body: bool = True) -> dict:
+    """Flatten a Gmail message into something readable in a tool result."""
+    summary = {
+        "id": message.get("id"),
+        "thread_id": message.get("threadId"),
+        "date": header(message, "Date"),
+        "from": header(message, "From"),
+        "to": header(message, "To"),
+        "subject": header(message, "Subject"),
+        "labels": message.get("labelIds", []),
+        "snippet": message.get("snippet", ""),
+    }
+
+    attachments = list_attachments(message)
+    if attachments:
+        summary["attachments"] = attachments
+    if include_body:
+        summary["body"] = extract_body(message)
+    return summary
