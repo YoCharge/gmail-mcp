@@ -14,10 +14,9 @@ import sys
 from pathlib import Path
 
 import httpx
-import mcp.types as types
-from mcp.server import Server
-from mcp.server.stdio import stdio_server
+from mcp.server import MCPServer
 
+from . import __version__
 from .auth import AuthError, Credentials
 from .gmail import GmailClient, GmailError, summarise_message
 
@@ -87,83 +86,42 @@ def assert_account(client: GmailClient, expected: str) -> str:
     return actual
 
 
-def build_tools(account: str) -> list[types.Tool]:
-    """Tool definitions, with the mailbox named in every description."""
-    return [
-        types.Tool(
-            name="search_threads",
-            description=(
-                f"Search threads in {account}. Accepts full Gmail search syntax, "
-                f"e.g. 'is:unread', 'from:alerts@example.com', 'newer_than:7d'. "
-                f"Returns thread ids and snippets; use get_thread for full content."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Gmail search query, e.g. 'in:inbox is:unread'.",
-                    },
-                    "max_results": {
-                        "type": "integer",
-                        "description": "Maximum threads to return (1-500). Default 20.",
-                        "default": 20,
-                    },
-                },
-                "required": ["query"],
-            },
+TOOL_NAMES = (
+    "search_threads",
+    "get_thread",
+    "get_message",
+    "list_labels",
+    "download_attachment",
+)
+
+
+def tool_descriptions(account: str) -> dict[str, str]:
+    """Descriptions carrying the mailbox name.
+
+    Built at runtime rather than written as docstrings: with several of these
+    servers registered, the description is what tells a client which mailbox a
+    tool reaches. A static docstring would make them indistinguishable.
+    """
+    return {
+        "search_threads": (
+            f"Search threads in {account}. Accepts full Gmail search syntax, "
+            f"e.g. 'is:unread', 'from:alerts@example.com', 'newer_than:7d'. "
+            f"Returns thread ids and snippets; use get_thread for full content."
         ),
-        types.Tool(
-            name="get_thread",
-            description=(
-                f"Read one full thread from {account} — every message, with headers, "
-                f"decoded body text and any attachment ids."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {"thread_id": {"type": "string"}},
-                "required": ["thread_id"],
-            },
+        "get_thread": (
+            f"Read one full thread from {account} — every message, with headers, "
+            f"decoded body text and any attachment ids."
         ),
-        types.Tool(
-            name="get_message",
-            description=f"Read one message from {account} by id, with headers and decoded body.",
-            inputSchema={
-                "type": "object",
-                "properties": {"message_id": {"type": "string"}},
-                "required": ["message_id"],
-            },
+        "get_message": (
+            f"Read one message from {account} by id, with headers and decoded body."
         ),
-        types.Tool(
-            name="list_labels",
-            description=f"List all label names and ids in {account}.",
-            inputSchema={"type": "object", "properties": {}},
+        "list_labels": f"List all label names and ids in {account}.",
+        "download_attachment": (
+            f"Download one attachment from a message in {account} to disk. "
+            f"Attachment ids come from get_thread or get_message. dest_dir may be "
+            f"omitted only if GMAIL_MCP_DOWNLOAD_DIR is set."
         ),
-        types.Tool(
-            name="download_attachment",
-            description=(
-                f"Download one attachment from a message in {account} to disk. "
-                f"Attachment ids come from get_thread or get_message. "
-                f"dest_dir may be omitted only if GMAIL_MCP_DOWNLOAD_DIR is set."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "message_id": {"type": "string"},
-                    "attachment_id": {"type": "string"},
-                    "dest_dir": {
-                        "type": "string",
-                        "description": "Directory to write into. Falls back to GMAIL_MCP_DOWNLOAD_DIR.",
-                    },
-                    "filename": {
-                        "type": "string",
-                        "description": "Override the filename. Defaults to the attachment's own name.",
-                    },
-                },
-                "required": ["message_id", "attachment_id"],
-            },
-        ),
-    ]
+    }
 
 
 def resolve_dest_dir(requested: str | None, fallback: str | None) -> Path:
@@ -256,26 +214,58 @@ def _dispatch(client: GmailClient, account: str, download_dir: str | None,
     raise ValueError(f"Unknown tool: {name}")
 
 
-def build_server(client: GmailClient, account: str, download_dir: str | None) -> Server:
-    server = Server("gmail-mcp")
+def build_server(client: GmailClient, account: str, download_dir: str | None) -> MCPServer:
+    server = MCPServer(name="gmail-mcp", version=__version__)
     notice = UNTRUSTED_NOTICE.format(account=account)
+    descriptions = tool_descriptions(account)
 
-    @server.list_tools()
-    async def list_tools() -> list[types.Tool]:
-        return build_tools(account)
-
-    @server.call_tool()
-    async def call_tool(name: str, arguments: dict | None) -> list[types.TextContent]:
+    async def run_tool(name: str, arguments: dict) -> str:
         try:
             # The Gmail client is synchronous; keep it off the event loop so a slow
             # API call cannot stall the MCP connection.
             body = await asyncio.to_thread(
-                _dispatch, client, account, download_dir, name, arguments or {}
+                _dispatch, client, account, download_dir, name, arguments
             )
         except (GmailError, AuthError, ValueError) as exc:
-            return [types.TextContent(type="text", text=f"Error: {exc}")]
+            # Returned as text rather than raised: a failed search is information
+            # the caller can act on, not a reason to drop the connection.
+            return f"Error: {exc}"
+        return f"{notice}\n\n{body}"
 
-        return [types.TextContent(type="text", text=f"{notice}\n\n{body}")]
+    async def search_threads(query: str, max_results: int = 20) -> str:
+        return await run_tool("search_threads", {"query": query, "max_results": max_results})
+
+    async def get_thread(thread_id: str) -> str:
+        return await run_tool("get_thread", {"thread_id": thread_id})
+
+    async def get_message(message_id: str) -> str:
+        return await run_tool("get_message", {"message_id": message_id})
+
+    async def list_labels() -> str:
+        return await run_tool("list_labels", {})
+
+    async def download_attachment(
+        message_id: str,
+        attachment_id: str,
+        dest_dir: str | None = None,
+        filename: str | None = None,
+    ) -> str:
+        return await run_tool(
+            "download_attachment",
+            {
+                "message_id": message_id,
+                "attachment_id": attachment_id,
+                "dest_dir": dest_dir,
+                "filename": filename,
+            },
+        )
+
+    for function in (search_threads, get_thread, get_message, list_labels, download_attachment):
+        server.add_tool(
+            function,
+            name=function.__name__,
+            description=descriptions[function.__name__],
+        )
 
     return server
 
@@ -290,8 +280,7 @@ async def _serve() -> None:
     print(f"gmail-mcp: serving {resolved} (read-only)", file=sys.stderr)
 
     server = build_server(client, account, download_dir)
-    async with stdio_server() as (read_stream, write_stream):
-        await server.run(read_stream, write_stream, server.create_initialization_options())
+    await server.run_stdio_async()
 
 
 def run() -> None:

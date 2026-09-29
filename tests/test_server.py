@@ -5,13 +5,15 @@ import pytest
 
 from gmail_mcp.gmail import GmailClient
 from gmail_mcp.server import (
+    TOOL_NAMES,
     ConfigError,
     _dispatch,
     assert_account,
-    build_tools,
+    build_server,
     load_config,
     resolve_dest_dir,
     safe_filename,
+    tool_descriptions,
 )
 from conftest import b64, make_client
 
@@ -87,12 +89,15 @@ def test_a_token_for_another_mailbox_is_refused(credentials):
 
 def test_every_tool_names_its_mailbox():
     """With several servers registered, the description is what disambiguates them."""
-    for tool in build_tools("you@example.com"):
-        assert "you@example.com" in tool.description
+    descriptions = tool_descriptions("you@example.com")
+
+    assert set(descriptions) == set(TOOL_NAMES)
+    for name, text in descriptions.items():
+        assert "you@example.com" in text, f"{name} does not name its mailbox"
 
 
 def test_the_surface_is_read_only():
-    names = {tool.name for tool in build_tools("you@example.com")}
+    names = set(TOOL_NAMES)
 
     assert names == {
         "search_threads",
@@ -103,6 +108,18 @@ def test_the_surface_is_read_only():
     }
     for forbidden in ("send", "reply", "forward", "draft", "trash", "label_message"):
         assert forbidden not in names
+
+
+async def test_the_server_registers_exactly_those_tools(credentials):
+    """Guards the wiring itself: a tool defined but never registered is invisible."""
+    client = GmailClient(credentials, make_client(lambda r: httpx.Response(200, json={})))
+    server = build_server(client, "you@example.com", None)
+
+    registered = await server.list_tools()
+
+    assert {tool.name for tool in registered} == set(TOOL_NAMES)
+    for tool in registered:
+        assert "you@example.com" in tool.description
 
 
 # -- attachment handling ---------------------------------------------------
