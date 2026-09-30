@@ -90,7 +90,17 @@ Add one entry per mailbox:
 }
 ```
 
-Refresh tokens are passwords. Keep this file out of version control.
+This is committed as [`.mcp.json.example`](.mcp.json.example) — copy it, then replace
+three values per mailbox.
+
+Note what the two entries share and what they do not: the **client ID and secret are
+the same for every mailbox**, because one OAuth client serves them all. Only
+`GMAIL_ACCOUNT` and `GMAIL_REFRESH_TOKEN` differ — and it is that pairing the server
+verifies at startup, so a token in the wrong entry stops the server rather than
+silently opening the wrong inbox.
+
+Refresh tokens are passwords. Keep your real config out of version control — the
+`.gitignore` here already excludes `.mcp.json` while keeping the example.
 
 ## Tools
 
