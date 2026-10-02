@@ -28,11 +28,17 @@ The one tool that can put a message in someone's inbox, `send_draft`, takes a
 sending something the caller already has on screen, however that draft was composed.
 See [Sending](#sending) below for the confirmation step this depends on.
 
-It can also label and trash threads (`label_thread`, `trash_thread`, and their
-undo counterparts `unlabel_thread`/`untrash_thread`). Trashing is reversible — Gmail
-keeps trashed mail for about 30 days. There is deliberately no permanent-delete tool:
-Gmail only exposes that under the much broader `https://mail.google.com/` scope
-(full account access), which this server does not request.
+It can also label, trash and spam-mark threads and individual messages
+(`label_thread`/`label_message`, `trash_thread`/`trash_message`,
+`mark_thread_spam`/`mark_message_spam`, and their undo counterparts), plus manage
+label definitions themselves (`create_label`, `update_label`, `delete_label`).
+Trashing and spam-marking are reversible — Gmail keeps trashed mail for about 30
+days, and the spam/inbox flip undoes exactly. `delete_label` is the one irreversible
+call in this group: deleting a label definition removes it from every message that
+had it, and recreating a same-named label does not relink them. There is
+deliberately no permanent-delete-a-message tool: Gmail only exposes that under the
+much broader `https://mail.google.com/` scope (full account access), which this
+server does not request.
 
 ## Install
 
@@ -114,7 +120,7 @@ Refresh tokens are passwords. Keep your real config out of version control — t
 
 ## Tools
 
-Twenty, each named with its mailbox in the description.
+Thirty-one, each named with its mailbox in the description.
 
 | Tool | Does |
 |---|---|
@@ -138,6 +144,17 @@ Twenty, each named with its mailbox in the description.
 | `apply_sensitive_thread_label(thread_id, label_option)` | `label_option`: `TRASH` (= `trash_thread`) or `SPAM` (= `mark_thread_spam`) |
 | `mark_thread_spam(thread_id)` | Marks a thread as spam. Reversible — recover with `unmark_thread_spam` |
 | `unmark_thread_spam(thread_id)` | Undoes `mark_thread_spam` |
+| `label_message(message_id, label_ids)` | Adds one or more labels to a single message |
+| `unlabel_message(message_id, label_ids)` | Removes one or more labels from a single message |
+| `update_message_labels(message_id, add_label_ids?, remove_label_ids?)` | Adds and removes labels on a message in one call |
+| `apply_sensitive_message_label(message_id, label_option)` | `label_option`: `TRASH` (= `trash_message`) or `SPAM` (= `mark_message_spam`) |
+| `trash_message(message_id)` | Moves a single message to Trash. Reversible — recover with `untrash_message` |
+| `untrash_message(message_id)` | Recovers a trashed message |
+| `mark_message_spam(message_id)` | Marks a single message as spam. Reversible — recover with `unmark_message_spam` |
+| `unmark_message_spam(message_id)` | Undoes `mark_message_spam` |
+| `create_label(name, label_list_visibility?, message_list_visibility?)` | Creates a new label |
+| `update_label(label_id, name?, label_list_visibility?, message_list_visibility?)` | Renames/reconfigures an existing label |
+| `delete_label(label_id)` | Deletes a label definition. **Cannot be undone** — every message loses it |
 
 `download_attachment` requires a destination: either `dest_dir` on the call, or
 `GMAIL_MCP_DOWNLOAD_DIR` in the environment. It will not guess a directory. Filenames

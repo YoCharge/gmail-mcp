@@ -126,8 +126,19 @@ def test_sending_is_only_possible_through_an_already_composed_draft():
         "apply_sensitive_thread_label",
         "mark_thread_spam",
         "unmark_thread_spam",
+        "label_message",
+        "unlabel_message",
+        "update_message_labels",
+        "apply_sensitive_message_label",
+        "trash_message",
+        "untrash_message",
+        "mark_message_spam",
+        "unmark_message_spam",
+        "create_label",
+        "update_label",
+        "delete_label",
     }
-    for forbidden in ("send_message", "reply", "forward", "label_message"):
+    for forbidden in ("send_message", "reply", "forward"):
         assert forbidden not in names
 
 
@@ -593,3 +604,218 @@ def test_unmark_thread_spam_reports_spam_false(credentials):
 
     assert result["spam"] is False
     assert seen["body"] == {"addLabelIds": ["INBOX"], "removeLabelIds": ["SPAM"]}
+
+
+# -- message labeling, trash, and spam ---------------------------------------
+
+
+def _modify_handler(seen, message_id="m1"):
+    def handler(request):
+        url = str(request.url)
+        if "oauth2.googleapis.com" in url:
+            return httpx.Response(200, json={"access_token": "tok", "expires_in": 3600})
+        if f"/messages/{message_id}/modify" in url:
+            seen["body"] = json.loads(request.content)
+            return httpx.Response(200, json={"id": message_id})
+        return httpx.Response(404, json={"error": {"message": "unexpected"}})
+
+    return handler
+
+
+def test_label_message_posts_add_label_ids(credentials):
+    seen = {}
+    client = GmailClient(credentials, make_client(_modify_handler(seen)))
+    result = json.loads(
+        _dispatch(
+            client, "you@example.com", None, "label_message",
+            {"message_id": "m1", "label_ids": ["STARRED"]},
+        )
+    )
+
+    assert result["added"] == ["STARRED"]
+    assert seen["body"] == {"addLabelIds": ["STARRED"]}
+
+
+def test_unlabel_message_posts_remove_label_ids(credentials):
+    seen = {}
+    client = GmailClient(credentials, make_client(_modify_handler(seen)))
+    result = json.loads(
+        _dispatch(
+            client, "you@example.com", None, "unlabel_message",
+            {"message_id": "m1", "label_ids": ["STARRED"]},
+        )
+    )
+
+    assert result["removed"] == ["STARRED"]
+    assert seen["body"] == {"removeLabelIds": ["STARRED"]}
+
+
+def test_update_message_labels_adds_and_removes_in_one_call(credentials):
+    seen = {}
+    client = GmailClient(credentials, make_client(_modify_handler(seen)))
+    result = json.loads(
+        _dispatch(
+            client, "you@example.com", None, "update_message_labels",
+            {"message_id": "m1", "add_label_ids": ["STARRED"], "remove_label_ids": ["UNREAD"]},
+        )
+    )
+
+    assert result["added"] == ["STARRED"]
+    assert result["removed"] == ["UNREAD"]
+    assert seen["body"] == {"addLabelIds": ["STARRED"], "removeLabelIds": ["UNREAD"]}
+
+
+def test_update_message_labels_requires_at_least_one_change(credentials):
+    client = GmailClient(credentials, make_client(lambda r: httpx.Response(200, json={})))
+    with pytest.raises(ValueError, match="add_label_ids and/or remove_label_ids"):
+        _dispatch(client, "you@example.com", None, "update_message_labels", {"message_id": "m1"})
+
+
+def test_apply_sensitive_message_label_trash_routes_to_trash_endpoint(credentials):
+    hit = {"path": None}
+
+    def handler(request):
+        url = str(request.url)
+        if "oauth2.googleapis.com" in url:
+            return httpx.Response(200, json={"access_token": "tok", "expires_in": 3600})
+        hit["path"] = url
+        return httpx.Response(200, json={"id": "m1"})
+
+    client = GmailClient(credentials, make_client(handler))
+    result = json.loads(
+        _dispatch(
+            client, "you@example.com", None, "apply_sensitive_message_label",
+            {"message_id": "m1", "label_option": "TRASH"},
+        )
+    )
+
+    assert result["label_option"] == "TRASH"
+    assert hit["path"].endswith("/messages/m1/trash")
+
+
+def test_apply_sensitive_message_label_spam_routes_to_modify(credentials):
+    seen = {}
+    client = GmailClient(credentials, make_client(_modify_handler(seen)))
+    result = json.loads(
+        _dispatch(
+            client, "you@example.com", None, "apply_sensitive_message_label",
+            {"message_id": "m1", "label_option": "SPAM"},
+        )
+    )
+
+    assert result["label_option"] == "SPAM"
+    assert seen["body"] == {"addLabelIds": ["SPAM"], "removeLabelIds": ["INBOX"]}
+
+
+def test_apply_sensitive_message_label_rejects_an_unknown_option(credentials):
+    client = GmailClient(credentials, make_client(lambda r: httpx.Response(200, json={})))
+    with pytest.raises(ValueError, match="Unknown label_option"):
+        _dispatch(
+            client, "you@example.com", None, "apply_sensitive_message_label",
+            {"message_id": "m1", "label_option": "BOGUS"},
+        )
+
+
+def test_trash_message_and_untrash_message_hit_their_own_endpoints(credentials):
+    hits = []
+
+    def handler(request):
+        url = str(request.url)
+        if "oauth2.googleapis.com" in url:
+            return httpx.Response(200, json={"access_token": "tok", "expires_in": 3600})
+        if "/messages/m1/trash" in url or "/messages/m1/untrash" in url:
+            hits.append(url)
+            return httpx.Response(200, json={"id": "m1"})
+        return httpx.Response(404, json={"error": {"message": "unexpected"}})
+
+    client = GmailClient(credentials, make_client(handler))
+
+    trashed = json.loads(_dispatch(client, "you@example.com", None, "trash_message", {"message_id": "m1"}))
+    restored = json.loads(_dispatch(client, "you@example.com", None, "untrash_message", {"message_id": "m1"}))
+
+    assert trashed["trashed"] is True
+    assert restored["trashed"] is False
+    assert any(h.endswith("/messages/m1/trash") for h in hits)
+    assert any(h.endswith("/messages/m1/untrash") for h in hits)
+
+
+def test_mark_message_spam_and_unmark_message_spam_flip_the_right_labels(credentials):
+    seen = {}
+    client = GmailClient(credentials, make_client(_modify_handler(seen)))
+
+    marked = json.loads(_dispatch(client, "you@example.com", None, "mark_message_spam", {"message_id": "m1"}))
+    assert marked["spam"] is True
+    assert seen["body"] == {"addLabelIds": ["SPAM"], "removeLabelIds": ["INBOX"]}
+
+    unmarked = json.loads(
+        _dispatch(client, "you@example.com", None, "unmark_message_spam", {"message_id": "m1"})
+    )
+    assert unmarked["spam"] is False
+    assert seen["body"] == {"addLabelIds": ["INBOX"], "removeLabelIds": ["SPAM"]}
+
+
+# -- label definitions --------------------------------------------------------
+
+
+def test_create_label_posts_the_given_fields(credentials):
+    seen = {}
+
+    def handler(request):
+        url = str(request.url)
+        if "oauth2.googleapis.com" in url:
+            return httpx.Response(200, json={"access_token": "tok", "expires_in": 3600})
+        if request.method == "POST" and url.endswith("/labels"):
+            seen["body"] = json.loads(request.content)
+            return httpx.Response(200, json={"id": "Label_1", "name": "Projects"})
+        return httpx.Response(404, json={"error": {"message": "unexpected"}})
+
+    client = GmailClient(credentials, make_client(handler))
+    result = json.loads(
+        _dispatch(client, "you@example.com", None, "create_label", {"name": "Projects"})
+    )
+
+    assert result["label_id"] == "Label_1"
+    assert result["name"] == "Projects"
+    assert seen["body"] == {
+        "name": "Projects",
+        "labelListVisibility": "labelShow",
+        "messageListVisibility": "show",
+    }
+
+
+def test_update_label_only_sends_the_provided_fields(credentials):
+    seen = {}
+
+    def handler(request):
+        url = str(request.url)
+        if "oauth2.googleapis.com" in url:
+            return httpx.Response(200, json={"access_token": "tok", "expires_in": 3600})
+        if request.method == "PATCH" and url.endswith("/labels/Label_1"):
+            seen["body"] = json.loads(request.content)
+            return httpx.Response(200, json={"id": "Label_1", "name": "Archive"})
+        return httpx.Response(404, json={"error": {"message": "unexpected"}})
+
+    client = GmailClient(credentials, make_client(handler))
+    result = json.loads(
+        _dispatch(
+            client, "you@example.com", None, "update_label",
+            {"label_id": "Label_1", "name": "Archive"},
+        )
+    )
+
+    assert result["name"] == "Archive"
+    assert seen["body"] == {"name": "Archive"}
+
+
+def test_delete_label_reports_what_was_deleted(credentials):
+    def handler(request):
+        if "oauth2.googleapis.com" in str(request.url):
+            return httpx.Response(200, json={"access_token": "tok", "expires_in": 3600})
+        return httpx.Response(204)
+
+    client = GmailClient(credentials, make_client(handler))
+    result = json.loads(
+        _dispatch(client, "you@example.com", None, "delete_label", {"label_id": "Label_1"})
+    )
+
+    assert result["deleted"] == "Label_1"

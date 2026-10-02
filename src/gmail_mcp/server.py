@@ -118,6 +118,17 @@ TOOL_NAMES = (
     "apply_sensitive_thread_label",
     "mark_thread_spam",
     "unmark_thread_spam",
+    "label_message",
+    "unlabel_message",
+    "update_message_labels",
+    "apply_sensitive_message_label",
+    "trash_message",
+    "untrash_message",
+    "mark_message_spam",
+    "unmark_message_spam",
+    "create_label",
+    "update_label",
+    "delete_label",
 )
 
 
@@ -212,6 +223,57 @@ def tool_descriptions(account: str) -> dict[str, str]:
         "unmark_thread_spam": (
             f"Undo mark_thread_spam on a thread in {account} — flips INBOX back on "
             f"and SPAM off."
+        ),
+        "label_message": (
+            f"Add one or more labels to a single message in {account} (as opposed to "
+            f"its whole thread — use label_thread for that). label_ids are Gmail "
+            f"label ids — use list_labels to find user-defined ones, or pass a system "
+            f"label directly (e.g. STARRED, IMPORTANT, UNREAD)."
+        ),
+        "unlabel_message": (
+            f"Remove one or more labels from a single message in {account}. Same "
+            f"label_ids as label_message."
+        ),
+        "update_message_labels": (
+            f"Add and remove labels on a single message in {account} in one call — "
+            f"pass add_label_ids and/or remove_label_ids. Unlike calling "
+            f"label_message and unlabel_message separately, both changes land "
+            f"atomically. At least one of the two lists must be non-empty."
+        ),
+        "apply_sensitive_message_label": (
+            f"Apply a sensitive label to a single message in {account}. label_option "
+            f"is 'TRASH' (same as trash_message — reversible, undo with "
+            f"untrash_message) or 'SPAM' (same as mark_message_spam — reversible, "
+            f"undo with unmark_message_spam)."
+        ),
+        "trash_message": (
+            f"Move a single message in {account} to Trash — its thread and other "
+            f"messages in it are unaffected. Reversible — undo with untrash_message."
+        ),
+        "untrash_message": f"Recover a trashed message in {account} back to its previous location.",
+        "mark_message_spam": (
+            f"Mark a single message in {account} as spam — flips the SPAM label on "
+            f"and INBOX off. Reversible — undo with unmark_message_spam."
+        ),
+        "unmark_message_spam": (
+            f"Undo mark_message_spam on a message in {account} — flips INBOX back on "
+            f"and SPAM off."
+        ),
+        "create_label": (
+            f"Create a new label in {account}. name is required; "
+            f"label_list_visibility (default 'labelShow') and message_list_visibility "
+            f"(default 'show') control where it appears in the Gmail UI."
+        ),
+        "update_label": (
+            f"Rename or change the visibility of an existing label in {account}. "
+            f"label_id is required; pass only the fields you want to change — name, "
+            f"label_list_visibility, message_list_visibility — anything omitted is "
+            f"left as-is."
+        ),
+        "delete_label": (
+            f"Delete a label definition in {account} by id. THIS CANNOT BE UNDONE — "
+            f"every message carrying this label loses it, and recreating a "
+            f"same-named label does not relink them. Use list_labels to find the id."
         ),
     }
 
@@ -483,6 +545,104 @@ def _dispatch(client: GmailClient, account: str, download_dir: str | None,
             {"account": account, "thread_id": arguments["thread_id"], "spam": False}, indent=2
         )
 
+    if name == "label_message":
+        client.label_message(arguments["message_id"], arguments["label_ids"])
+        return json.dumps(
+            {"account": account, "message_id": arguments["message_id"], "added": arguments["label_ids"]},
+            indent=2,
+        )
+
+    if name == "unlabel_message":
+        client.unlabel_message(arguments["message_id"], arguments["label_ids"])
+        return json.dumps(
+            {
+                "account": account,
+                "message_id": arguments["message_id"],
+                "removed": arguments["label_ids"],
+            },
+            indent=2,
+        )
+
+    if name == "update_message_labels":
+        add_label_ids = arguments.get("add_label_ids") or None
+        remove_label_ids = arguments.get("remove_label_ids") or None
+        if not add_label_ids and not remove_label_ids:
+            raise ValueError("Provide add_label_ids and/or remove_label_ids.")
+        client.update_message_labels(
+            arguments["message_id"], add_label_ids=add_label_ids, remove_label_ids=remove_label_ids
+        )
+        return json.dumps(
+            {
+                "account": account,
+                "message_id": arguments["message_id"],
+                "added": add_label_ids or [],
+                "removed": remove_label_ids or [],
+            },
+            indent=2,
+        )
+
+    if name == "apply_sensitive_message_label":
+        message_id = arguments["message_id"]
+        label_option = arguments["label_option"]
+        if label_option == "TRASH":
+            client.trash_message(message_id)
+        elif label_option == "SPAM":
+            client.mark_message_spam(message_id)
+        else:
+            raise ValueError(f"Unknown label_option: {label_option!r}. Use 'TRASH' or 'SPAM'.")
+        return json.dumps(
+            {"account": account, "message_id": message_id, "label_option": label_option}, indent=2
+        )
+
+    if name == "trash_message":
+        client.trash_message(arguments["message_id"])
+        return json.dumps(
+            {"account": account, "message_id": arguments["message_id"], "trashed": True}, indent=2
+        )
+
+    if name == "untrash_message":
+        client.untrash_message(arguments["message_id"])
+        return json.dumps(
+            {"account": account, "message_id": arguments["message_id"], "trashed": False}, indent=2
+        )
+
+    if name == "mark_message_spam":
+        client.mark_message_spam(arguments["message_id"])
+        return json.dumps(
+            {"account": account, "message_id": arguments["message_id"], "spam": True}, indent=2
+        )
+
+    if name == "unmark_message_spam":
+        client.unmark_message_spam(arguments["message_id"])
+        return json.dumps(
+            {"account": account, "message_id": arguments["message_id"], "spam": False}, indent=2
+        )
+
+    if name == "create_label":
+        label = client.create_label(
+            arguments["name"],
+            label_list_visibility=arguments.get("label_list_visibility", "labelShow"),
+            message_list_visibility=arguments.get("message_list_visibility", "show"),
+        )
+        return json.dumps(
+            {"account": account, "label_id": label.get("id"), "name": label.get("name")}, indent=2
+        )
+
+    if name == "update_label":
+        label = client.update_label(
+            arguments["label_id"],
+            name=arguments.get("name"),
+            label_list_visibility=arguments.get("label_list_visibility"),
+            message_list_visibility=arguments.get("message_list_visibility"),
+        )
+        return json.dumps(
+            {"account": account, "label_id": label.get("id"), "name": label.get("name")}, indent=2
+        )
+
+    if name == "delete_label":
+        client.delete_label(arguments["label_id"])
+        return json.dumps({"account": account, "deleted": arguments["label_id"]}, indent=2)
+
     raise ValueError(f"Unknown tool: {name}")
 
 
@@ -634,6 +794,77 @@ def build_server(client: GmailClient, account: str, download_dir: str | None) ->
     async def unmark_thread_spam(thread_id: str) -> str:
         return await run_tool("unmark_thread_spam", {"thread_id": thread_id})
 
+    async def label_message(message_id: str, label_ids: list[str]) -> str:
+        return await run_tool("label_message", {"message_id": message_id, "label_ids": label_ids})
+
+    async def unlabel_message(message_id: str, label_ids: list[str]) -> str:
+        return await run_tool("unlabel_message", {"message_id": message_id, "label_ids": label_ids})
+
+    async def update_message_labels(
+        message_id: str,
+        add_label_ids: list[str] | None = None,
+        remove_label_ids: list[str] | None = None,
+    ) -> str:
+        return await run_tool(
+            "update_message_labels",
+            {
+                "message_id": message_id,
+                "add_label_ids": add_label_ids,
+                "remove_label_ids": remove_label_ids,
+            },
+        )
+
+    async def apply_sensitive_message_label(message_id: str, label_option: str) -> str:
+        return await run_tool(
+            "apply_sensitive_message_label",
+            {"message_id": message_id, "label_option": label_option},
+        )
+
+    async def trash_message(message_id: str) -> str:
+        return await run_tool("trash_message", {"message_id": message_id})
+
+    async def untrash_message(message_id: str) -> str:
+        return await run_tool("untrash_message", {"message_id": message_id})
+
+    async def mark_message_spam(message_id: str) -> str:
+        return await run_tool("mark_message_spam", {"message_id": message_id})
+
+    async def unmark_message_spam(message_id: str) -> str:
+        return await run_tool("unmark_message_spam", {"message_id": message_id})
+
+    async def create_label(
+        name: str,
+        label_list_visibility: str = "labelShow",
+        message_list_visibility: str = "show",
+    ) -> str:
+        return await run_tool(
+            "create_label",
+            {
+                "name": name,
+                "label_list_visibility": label_list_visibility,
+                "message_list_visibility": message_list_visibility,
+            },
+        )
+
+    async def update_label(
+        label_id: str,
+        name: str | None = None,
+        label_list_visibility: str | None = None,
+        message_list_visibility: str | None = None,
+    ) -> str:
+        return await run_tool(
+            "update_label",
+            {
+                "label_id": label_id,
+                "name": name,
+                "label_list_visibility": label_list_visibility,
+                "message_list_visibility": message_list_visibility,
+            },
+        )
+
+    async def delete_label(label_id: str) -> str:
+        return await run_tool("delete_label", {"label_id": label_id})
+
     for function in (
         search_threads,
         get_thread,
@@ -655,6 +886,17 @@ def build_server(client: GmailClient, account: str, download_dir: str | None) ->
         apply_sensitive_thread_label,
         mark_thread_spam,
         unmark_thread_spam,
+        label_message,
+        unlabel_message,
+        update_message_labels,
+        apply_sensitive_message_label,
+        trash_message,
+        untrash_message,
+        mark_message_spam,
+        unmark_message_spam,
+        create_label,
+        update_label,
+        delete_label,
     ):
         server.add_tool(
             function,

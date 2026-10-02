@@ -1,11 +1,15 @@
 """A thin Gmail REST client.
 
 Read surface, draft management (including replying and forwarding, both compose-only
-via create_draft), and thread labeling/trashing. Still only one way to actually send
-anything — send_draft, by draft id — so replying and forwarding pass through the same
-confirm-before-send gate as every other draft. Trashing a thread is reversible (Gmail
-keeps it ~30 days, undo with untrash_thread); there is deliberately no permanent-delete
-call, which Gmail only allows under the much broader https://mail.google.com/ scope.
+via create_draft), and labeling/trashing/spam for both threads and individual
+messages, plus label definitions (create/update/delete). Still only one way to
+actually send anything — send_draft, by draft id — so replying and forwarding pass
+through the same confirm-before-send gate as every other draft. Trash and spam are
+reversible pairs (Gmail keeps trashed mail ~30 days; untrash/unmark undo them
+exactly); there is deliberately no permanent-delete-a-message call, which Gmail only
+allows under the much broader https://mail.google.com/ scope. Deleting a label
+definition (delete_label) is the one irreversible call here — every message loses
+that label, and recreating a same-named label does not relink them.
 """
 
 from __future__ import annotations
@@ -162,6 +166,93 @@ class GmailClient:
 
     def untrash_thread(self, thread_id: str) -> dict:
         return self._write("POST", f"/threads/{thread_id}/untrash")
+
+    # -- message labeling and trash -------------------------------------------
+    #
+    # Same shape as the thread-level calls above, one message at a time: trashing
+    # or spam-marking a single message does not touch the rest of its thread.
+
+    def label_message(self, message_id: str, label_ids: list[str]) -> dict:
+        return self._write("POST", f"/messages/{message_id}/modify", {"addLabelIds": label_ids})
+
+    def unlabel_message(self, message_id: str, label_ids: list[str]) -> dict:
+        return self._write(
+            "POST", f"/messages/{message_id}/modify", {"removeLabelIds": label_ids}
+        )
+
+    def update_message_labels(
+        self,
+        message_id: str,
+        add_label_ids: list[str] | None = None,
+        remove_label_ids: list[str] | None = None,
+    ) -> dict:
+        """Add and remove labels in the same call, unlike label_message/unlabel_message."""
+        body: dict[str, Any] = {}
+        if add_label_ids:
+            body["addLabelIds"] = add_label_ids
+        if remove_label_ids:
+            body["removeLabelIds"] = remove_label_ids
+        return self._write("POST", f"/messages/{message_id}/modify", body)
+
+    def trash_message(self, message_id: str) -> dict:
+        return self._write("POST", f"/messages/{message_id}/trash")
+
+    def untrash_message(self, message_id: str) -> dict:
+        return self._write("POST", f"/messages/{message_id}/untrash")
+
+    def mark_message_spam(self, message_id: str) -> dict:
+        """Flip SPAM on and INBOX off. Undo with unmark_message_spam."""
+        return self._write(
+            "POST", f"/messages/{message_id}/modify",
+            {"addLabelIds": ["SPAM"], "removeLabelIds": ["INBOX"]},
+        )
+
+    def unmark_message_spam(self, message_id: str) -> dict:
+        """Flip INBOX on and SPAM off — undoes mark_message_spam exactly."""
+        return self._write(
+            "POST", f"/messages/{message_id}/modify",
+            {"addLabelIds": ["INBOX"], "removeLabelIds": ["SPAM"]},
+        )
+
+    # -- label definitions -----------------------------------------------------
+    #
+    # Creating, renaming or deleting a label definition itself, as distinct from
+    # applying one to a message/thread. Deleting one is NOT reversible: every
+    # message loses it, and recreating a same-named label does not relink them.
+
+    def create_label(
+        self,
+        name: str,
+        label_list_visibility: str = "labelShow",
+        message_list_visibility: str = "show",
+    ) -> dict:
+        return self._write(
+            "POST", "/labels",
+            {
+                "name": name,
+                "labelListVisibility": label_list_visibility,
+                "messageListVisibility": message_list_visibility,
+            },
+        )
+
+    def update_label(
+        self,
+        label_id: str,
+        name: str | None = None,
+        label_list_visibility: str | None = None,
+        message_list_visibility: str | None = None,
+    ) -> dict:
+        body: dict[str, Any] = {}
+        if name is not None:
+            body["name"] = name
+        if label_list_visibility is not None:
+            body["labelListVisibility"] = label_list_visibility
+        if message_list_visibility is not None:
+            body["messageListVisibility"] = message_list_visibility
+        return self._write("PATCH", f"/labels/{label_id}", body)
+
+    def delete_label(self, label_id: str) -> None:
+        self._write("DELETE", f"/labels/{label_id}")
 
 
 def _bearer(token: str) -> dict[str, str]:

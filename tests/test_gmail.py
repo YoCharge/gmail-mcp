@@ -350,6 +350,49 @@ def test_unmark_thread_spam_flips_inbox_on_and_spam_off(credentials):
     assert seen["body"] == {"addLabelIds": ["INBOX"], "removeLabelIds": ["SPAM"]}
 
 
+# -- label definitions --------------------------------------------------------
+
+
+def test_create_label_posts_name_and_visibility_defaults(credentials):
+    seen = {}
+
+    def create(request):
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"id": "Label_1", "name": "Projects"})
+
+    client = GmailClient(credentials, make_client(routed({"/labels": create})))
+    result = client.create_label("Projects")
+
+    assert result["id"] == "Label_1"
+    assert seen["body"] == {
+        "name": "Projects",
+        "labelListVisibility": "labelShow",
+        "messageListVisibility": "show",
+    }
+
+
+def test_update_label_sends_a_partial_patch(credentials):
+    seen = {}
+
+    def update(request):
+        assert request.method == "PATCH"
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"id": "Label_1", "name": "Archive"})
+
+    client = GmailClient(credentials, make_client(routed({"/labels/Label_1": update})))
+    result = client.update_label("Label_1", name="Archive")
+
+    assert result["name"] == "Archive"
+    assert seen["body"] == {"name": "Archive"}
+
+
+def test_delete_label_handles_the_empty_204_body(credentials):
+    client = GmailClient(
+        credentials, make_client(routed({"/labels/Label_1": httpx.Response(204)}))
+    )
+    assert client.delete_label("Label_1") is None
+
+
 def test_summarise_can_omit_the_body():
     message = {
         "id": "m1",
