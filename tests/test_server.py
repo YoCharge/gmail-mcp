@@ -97,7 +97,12 @@ def test_every_tool_names_its_mailbox():
 
 
 def test_sending_is_only_possible_through_an_already_composed_draft():
-    """The only send-capable tool takes a draft_id, never a fresh to/subject/body."""
+    """The only send-capable tool takes a draft_id, never a fresh to/subject/body.
+
+    create_reply_draft and create_forward_draft are compose-only, same as
+    create_draft: none of them can send, so there is still exactly one tool
+    (send_draft) that can put a message in someone's inbox.
+    """
     names = set(TOOL_NAMES)
 
     assert names == {
@@ -112,6 +117,8 @@ def test_sending_is_only_possible_through_an_already_composed_draft():
         "update_draft",
         "delete_draft",
         "send_draft",
+        "create_reply_draft",
+        "create_forward_draft",
     }
     for forbidden in ("send_message", "reply", "forward", "trash", "label_message"):
         assert forbidden not in names
@@ -321,3 +328,83 @@ def test_send_draft_hits_the_send_endpoint_and_reports_the_sent_id(credentials):
 
     assert result["draft_id"] == "d1"
     assert result["sent_message_id"] == "m1"
+
+
+ORIGINAL_MESSAGE = {
+    "id": "m1",
+    "threadId": "t1",
+    "payload": {
+        "headers": [
+            {"name": "Message-ID", "value": "<abc@mail.gmail.com>"},
+            {"name": "Subject", "value": "Hello"},
+            {"name": "From", "value": "Alice <alice@example.com>"},
+            {"name": "To", "value": "you@example.com, bob@example.com"},
+            {"name": "Cc", "value": "carol@example.com"},
+            {"name": "Date", "value": "Fri, 2 Oct 2026 10:00:00 +0000"},
+        ],
+        "mimeType": "text/plain",
+        "body": {"data": b64("Hi there")},
+    },
+}
+
+
+def test_create_reply_draft_threads_and_fills_recipients_for_reply_all(credentials):
+    seen = {}
+
+    def handler(request):
+        url = str(request.url)
+        if "oauth2.googleapis.com" in url:
+            return httpx.Response(200, json={"access_token": "tok", "expires_in": 3600})
+        if "/messages/m1" in url:
+            return httpx.Response(200, json=ORIGINAL_MESSAGE)
+        if request.method == "POST" and url.endswith("/drafts"):
+            seen["body"] = json.loads(request.content)
+            return httpx.Response(200, json={"id": "d1"})
+        return httpx.Response(404, json={"error": {"message": "unexpected"}})
+
+    client = GmailClient(credentials, make_client(handler))
+    result = json.loads(
+        _dispatch(
+            client, "you@example.com", None, "create_reply_draft",
+            {"message_id": "m1", "body": "Thanks!", "reply_all": True},
+        )
+    )
+
+    assert result["to"] == "Alice <alice@example.com>"
+    assert result["cc"] == "bob@example.com, carol@example.com"
+    assert result["subject"] == "Re: Hello"
+    assert seen["body"]["message"]["threadId"] == "t1"
+    raw = decode_base64url(seen["body"]["message"]["raw"])
+    assert "In-Reply-To: <abc@mail.gmail.com>" in raw
+    assert "Thanks!" in raw
+
+
+def test_create_forward_draft_quotes_the_original_and_starts_a_new_thread(credentials):
+    seen = {}
+
+    def handler(request):
+        url = str(request.url)
+        if "oauth2.googleapis.com" in url:
+            return httpx.Response(200, json={"access_token": "tok", "expires_in": 3600})
+        if "/messages/m1" in url:
+            return httpx.Response(200, json=ORIGINAL_MESSAGE)
+        if request.method == "POST" and url.endswith("/drafts"):
+            seen["body"] = json.loads(request.content)
+            return httpx.Response(200, json={"id": "d2"})
+        return httpx.Response(404, json={"error": {"message": "unexpected"}})
+
+    client = GmailClient(credentials, make_client(handler))
+    result = json.loads(
+        _dispatch(
+            client, "you@example.com", None, "create_forward_draft",
+            {"message_id": "m1", "to": "dave@example.com", "body": "FYI"},
+        )
+    )
+
+    assert result["to"] == "dave@example.com"
+    assert result["subject"] == "Fwd: Hello"
+    assert "threadId" not in seen["body"]["message"]
+    raw = decode_base64url(seen["body"]["message"]["raw"])
+    assert "FYI" in raw
+    assert "From: Alice <alice@example.com>" in raw
+    assert "Hi there" in raw

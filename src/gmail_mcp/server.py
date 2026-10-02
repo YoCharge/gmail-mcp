@@ -18,7 +18,18 @@ from mcp.server import MCPServer
 
 from . import __version__
 from .auth import AuthError, Credentials
-from .gmail import GmailClient, GmailError, build_mime_message, summarise_message
+from .gmail import (
+    GmailClient,
+    GmailError,
+    build_forward_mime_message,
+    build_mime_message,
+    build_reply_mime_message,
+    forward_subject,
+    header,
+    other_recipients,
+    reply_subject,
+    summarise_message,
+)
 
 # Prepended to every tool result. Mail is attacker-writable: anyone can send a message
 # to a swept mailbox, so its contents are data to be reported on, never instructions
@@ -98,6 +109,8 @@ TOOL_NAMES = (
     "update_draft",
     "delete_draft",
     "send_draft",
+    "create_reply_draft",
+    "create_forward_draft",
 )
 
 
@@ -148,6 +161,22 @@ def tool_descriptions(account: str) -> dict[str, str]:
             f"this only after create_draft (or get_draft) has shown the exact "
             f"to/subject/body and the user has explicitly confirmed they want it sent. "
             f"Never call this in the same turn as create_draft without that confirmation."
+        ),
+        "create_reply_draft": (
+            f"Create a draft replying to a message in {account}. Fetches the original "
+            f"for threading (In-Reply-To/References, same thread) and prefixes the "
+            f"subject with 'Re:' if needed. Defaults to replying only to the original "
+            f"sender; pass reply_all=true to also cc everyone else who was on the "
+            f"original's To/Cc. Pass to/cc/bcc to override either. Like create_draft, "
+            f"this only writes to the Drafts folder — send it via send_draft after "
+            f"the user confirms the echoed content."
+        ),
+        "create_forward_draft": (
+            f"Create a draft forwarding a message in {account} to new recipients, with "
+            f"the original's From/Date/Subject/To and body quoted underneath. Subject "
+            f"is prefixed with 'Fwd:' if needed. Does NOT carry over the original's "
+            f"attachments. Only writes to the Drafts folder — send via send_draft "
+            f"after confirmation, same as every other draft here."
         ),
     }
 
@@ -320,6 +349,54 @@ def _dispatch(client: GmailClient, account: str, download_dir: str | None,
             indent=2,
         )
 
+    if name == "create_reply_draft":
+        original = client.get_message(arguments["message_id"])
+        to = arguments.get("to") or header(original, "From")
+        cc = arguments.get("cc")
+        if cc is None and arguments.get("reply_all"):
+            cc = other_recipients(original, account) or None
+        raw = build_reply_mime_message(
+            original, arguments.get("body", ""), to=to, cc=cc, bcc=arguments.get("bcc")
+        )
+        draft = client.create_draft(raw, thread_id=original.get("threadId"))
+        return json.dumps(
+            {
+                "account": account,
+                "draft_id": draft.get("id"),
+                "in_reply_to_message_id": arguments["message_id"],
+                "to": to,
+                "subject": reply_subject(header(original, "Subject")),
+                "body": arguments.get("body", ""),
+                "cc": cc,
+                "bcc": arguments.get("bcc"),
+            },
+            indent=2,
+        )
+
+    if name == "create_forward_draft":
+        original = client.get_message(arguments["message_id"])
+        raw = build_forward_mime_message(
+            original,
+            arguments.get("body", ""),
+            to=arguments["to"],
+            cc=arguments.get("cc"),
+            bcc=arguments.get("bcc"),
+        )
+        draft = client.create_draft(raw)
+        return json.dumps(
+            {
+                "account": account,
+                "draft_id": draft.get("id"),
+                "forwarded_message_id": arguments["message_id"],
+                "to": arguments["to"],
+                "subject": forward_subject(header(original, "Subject")),
+                "body": arguments.get("body", ""),
+                "cc": arguments.get("cc"),
+                "bcc": arguments.get("bcc"),
+            },
+            indent=2,
+        )
+
     raise ValueError(f"Unknown tool: {name}")
 
 
@@ -416,6 +493,38 @@ def build_server(client: GmailClient, account: str, download_dir: str | None) ->
     async def send_draft(draft_id: str) -> str:
         return await run_tool("send_draft", {"draft_id": draft_id})
 
+    async def create_reply_draft(
+        message_id: str,
+        body: str = "",
+        reply_all: bool = False,
+        to: str | None = None,
+        cc: str | None = None,
+        bcc: str | None = None,
+    ) -> str:
+        return await run_tool(
+            "create_reply_draft",
+            {
+                "message_id": message_id,
+                "body": body,
+                "reply_all": reply_all,
+                "to": to,
+                "cc": cc,
+                "bcc": bcc,
+            },
+        )
+
+    async def create_forward_draft(
+        message_id: str,
+        to: str,
+        body: str = "",
+        cc: str | None = None,
+        bcc: str | None = None,
+    ) -> str:
+        return await run_tool(
+            "create_forward_draft",
+            {"message_id": message_id, "to": to, "body": body, "cc": cc, "bcc": bcc},
+        )
+
     for function in (
         search_threads,
         get_thread,
@@ -428,6 +537,8 @@ def build_server(client: GmailClient, account: str, download_dir: str | None) ->
         update_draft,
         delete_draft,
         send_draft,
+        create_reply_draft,
+        create_forward_draft,
     ):
         server.add_tool(
             function,

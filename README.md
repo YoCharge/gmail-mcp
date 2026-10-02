@@ -21,12 +21,13 @@ That choice is the whole point:
   endpoint and compares the address against the one it was configured with. Mismatch
   means exit, not a server quietly serving the wrong inbox under the right name.
 
-Composing and sending are two different tool calls, on purpose: `create_draft` only
-ever writes to the Drafts folder. The one tool that can put a message in someone's
-inbox, `send_draft`, takes a `draft_id` rather than a fresh `to`/`subject`/`body` — so
-sending always means sending something the caller already has on screen. See
-[Sending](#sending) below for the confirmation step this depends on. It still cannot
-reply, forward, label, archive, trash or delete existing mail.
+Composing and sending are two different tool calls, on purpose: `create_draft`,
+`create_reply_draft` and `create_forward_draft` only ever write to the Drafts folder.
+The one tool that can put a message in someone's inbox, `send_draft`, takes a
+`draft_id` rather than a fresh `to`/`subject`/`body` — so sending always means
+sending something the caller already has on screen, however that draft was composed.
+See [Sending](#sending) below for the confirmation step this depends on. It still
+cannot label, archive, trash or delete existing mail.
 
 ## Install
 
@@ -108,7 +109,7 @@ Refresh tokens are passwords. Keep your real config out of version control — t
 
 ## Tools
 
-Eleven, each named with its mailbox in the description.
+Thirteen, each named with its mailbox in the description.
 
 | Tool | Does |
 |---|---|
@@ -123,6 +124,8 @@ Eleven, each named with its mailbox in the description.
 | `update_draft(draft_id, to, subject?, body?, cc?, bcc?, thread_id?)` | Replaces an existing draft's contents |
 | `delete_draft(draft_id)` | Deletes a draft. Cannot be undone |
 | `send_draft(draft_id)` | Sends an existing draft. **Irreversible** — see [Sending](#sending) |
+| `create_reply_draft(message_id, body?, reply_all?, to?, cc?, bcc?)` | Drafts a threaded reply to a message |
+| `create_forward_draft(message_id, to, body?, cc?, bcc?)` | Drafts a forward quoting the original. No attachments carried over |
 
 `download_attachment` requires a destination: either `dest_dir` on the call, or
 `GMAIL_MCP_DOWNLOAD_DIR` in the environment. It will not guess a directory. Filenames
@@ -133,11 +136,13 @@ named `../../.ssh/authorized_keys` writes as `authorized_keys`.
 
 Composing and sending are deliberately two separate tools:
 
-1. `create_draft` (or `update_draft`) writes to the Drafts folder and echoes back the
-   exact `to`/`subject`/`body`/`cc`/`bcc` it just wrote, together with a `draft_id`.
+1. `create_draft`, `update_draft`, `create_reply_draft` or `create_forward_draft`
+   writes to the Drafts folder and echoes back the exact `to`/`subject`/`body` (plus
+   `cc`/`bcc`) it just wrote, together with a `draft_id`.
 2. `send_draft(draft_id)` is the only call in this server that can put a message in
    someone's inbox. It takes just the id — not the content — so there is no way to
-   compose and send in a single tool call.
+   compose and send in a single tool call, no matter which of the four ways was used
+   to compose it.
 
 That split exists so an agent (or the human driving it) always has a concrete draft
 to review between "write this email" and "send it". Nothing here enforces that a human

@@ -6,11 +6,16 @@ import pytest
 from gmail_mcp.gmail import (
     GmailClient,
     GmailError,
+    build_forward_mime_message,
     build_mime_message,
+    build_reply_mime_message,
     decode_base64url,
     extract_body,
+    forward_subject,
     header,
     list_attachments,
+    other_recipients,
+    reply_subject,
     summarise_message,
 )
 from conftest import b64, make_client
@@ -169,6 +174,62 @@ def test_build_mime_message_includes_the_given_fields():
     assert "Subject: Hi" in decoded
     assert "hello" in decoded
     assert "From:" not in decoded
+
+
+# -- reply / forward composition --------------------------------------------
+
+ORIGINAL = {
+    "id": "m1",
+    "threadId": "t1",
+    "payload": {
+        "headers": [
+            {"name": "Message-ID", "value": "<abc@mail.gmail.com>"},
+            {"name": "Subject", "value": "Hello"},
+            {"name": "From", "value": "Alice <alice@example.com>"},
+            {"name": "To", "value": "you@example.com, bob@example.com"},
+            {"name": "Cc", "value": "carol@example.com"},
+            {"name": "Date", "value": "Fri, 2 Oct 2026 10:00:00 +0000"},
+        ],
+        "mimeType": "text/plain",
+        "body": {"data": b64("Hi there")},
+    },
+}
+
+
+def test_reply_subject_adds_re_prefix_once():
+    assert reply_subject("Hello") == "Re: Hello"
+    assert reply_subject("Re: Hello") == "Re: Hello"
+    assert reply_subject("") == "Re:"
+
+
+def test_forward_subject_adds_fwd_prefix_once():
+    assert forward_subject("Hello") == "Fwd: Hello"
+    assert forward_subject("Fwd: Hello") == "Fwd: Hello"
+    assert forward_subject("") == "Fwd:"
+
+
+def test_build_reply_mime_message_threads_on_the_original():
+    raw = build_reply_mime_message(ORIGINAL, "Thanks!", to="alice@example.com")
+    decoded = decode_base64url(raw)
+
+    assert "Subject: Re: Hello" in decoded
+    assert "In-Reply-To: <abc@mail.gmail.com>" in decoded
+    assert "References: <abc@mail.gmail.com>" in decoded
+    assert "Thanks!" in decoded
+
+
+def test_build_forward_mime_message_quotes_the_original():
+    raw = build_forward_mime_message(ORIGINAL, "FYI", to="dave@example.com")
+    decoded = decode_base64url(raw)
+
+    assert "Subject: Fwd: Hello" in decoded
+    assert "FYI" in decoded
+    assert "From: Alice <alice@example.com>" in decoded
+    assert "Hi there" in decoded
+
+
+def test_other_recipients_excludes_the_account_and_merges_to_and_cc():
+    assert other_recipients(ORIGINAL, "you@example.com") == "bob@example.com, carol@example.com"
 
 
 # -- drafts -----------------------------------------------------------------

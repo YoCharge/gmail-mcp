@@ -1,9 +1,11 @@
 """A thin Gmail REST client.
 
-Read surface plus draft management. There is still deliberately no reply, forward,
-label or trash call here. Sending exists, but only as send_draft: it sends an
-already-composed draft by id, never a fresh to/subject/body in one call — so sending
-anything always passes through a draft a caller can inspect first.
+Read surface plus draft management, including replying and forwarding. Both of those
+are compose-only: they build a draft (via create_draft) threaded to or quoting an
+existing message, nothing more. There is still deliberately no label or trash call
+here, and still only one way to actually send anything — send_draft, by draft id —
+so replying and forwarding pass through the same confirm-before-send gate as every
+other draft.
 """
 
 from __future__ import annotations
@@ -173,6 +175,93 @@ def build_mime_message(
     message["Subject"] = subject
     message.set_content(body)
     return base64.urlsafe_b64encode(message.as_bytes()).decode().rstrip("=")
+
+
+def reply_subject(subject: str) -> str:
+    if not subject:
+        return "Re:"
+    return subject if subject.lower().startswith("re:") else f"Re: {subject}"
+
+
+def forward_subject(subject: str) -> str:
+    if not subject:
+        return "Fwd:"
+    return subject if subject.lower().startswith("fwd:") else f"Fwd: {subject}"
+
+
+def build_reply_mime_message(
+    original: dict,
+    body: str,
+    to: str,
+    cc: str | None = None,
+    bcc: str | None = None,
+) -> str:
+    """Build a reply threaded to `original` via In-Reply-To/References.
+
+    The caller is also expected to pass the original's threadId to create_draft:
+    that's what groups the reply in Gmail's own UI. These headers are what other
+    mail clients thread on, so both are set.
+    """
+    message_id = header(original, "Message-ID") or header(original, "Message-Id")
+    references = " ".join(part for part in (header(original, "References"), message_id) if part)
+
+    message = EmailMessage()
+    message["To"] = to
+    if cc:
+        message["Cc"] = cc
+    if bcc:
+        message["Bcc"] = bcc
+    message["Subject"] = reply_subject(header(original, "Subject"))
+    if message_id:
+        message["In-Reply-To"] = message_id
+    if references:
+        message["References"] = references
+    message.set_content(body)
+    return base64.urlsafe_b64encode(message.as_bytes()).decode().rstrip("=")
+
+
+def build_forward_mime_message(
+    original: dict,
+    body: str,
+    to: str,
+    cc: str | None = None,
+    bcc: str | None = None,
+) -> str:
+    """Build a forward: a new message quoting `original`'s headers and body.
+
+    Attachments on the original are not carried over — forwarding one would require
+    downloading and re-attaching its bytes, which no tool here does yet.
+    """
+    quoted = (
+        "---------- Forwarded message ----------\n"
+        f"From: {header(original, 'From')}\n"
+        f"Date: {header(original, 'Date')}\n"
+        f"Subject: {header(original, 'Subject')}\n"
+        f"To: {header(original, 'To')}\n\n"
+        f"{extract_body(original)}"
+    )
+    full_body = f"{body}\n\n{quoted}" if body else quoted
+
+    message = EmailMessage()
+    message["To"] = to
+    if cc:
+        message["Cc"] = cc
+    if bcc:
+        message["Bcc"] = bcc
+    message["Subject"] = forward_subject(header(original, "Subject"))
+    message.set_content(full_body)
+    return base64.urlsafe_b64encode(message.as_bytes()).decode().rstrip("=")
+
+
+def other_recipients(original: dict, account: str) -> str:
+    """Everyone on `original`'s To/Cc except `account`, comma-joined — for reply-all."""
+    addresses = []
+    for field in (header(original, "To"), header(original, "Cc")):
+        for part in field.split(","):
+            part = part.strip()
+            if part and account.lower() not in part.lower():
+                addresses.append(part)
+    return ", ".join(addresses)
 
 
 def decode_base64url(data: str) -> str:
