@@ -278,6 +278,78 @@ def test_send_draft_posts_only_the_draft_id(credentials):
     assert seen["body"] == {"id": "d1"}
 
 
+# -- thread labeling and trash -----------------------------------------------
+
+
+def test_label_thread_posts_add_label_ids(credentials):
+    seen = {}
+
+    def modify(request):
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"id": "t1"})
+
+    client = GmailClient(credentials, make_client(routed({"/threads/t1/modify": modify})))
+    client.label_thread("t1", ["STARRED"])
+
+    assert seen["body"] == {"addLabelIds": ["STARRED"]}
+
+
+def test_unlabel_thread_posts_remove_label_ids(credentials):
+    seen = {}
+
+    def modify(request):
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"id": "t1"})
+
+    client = GmailClient(credentials, make_client(routed({"/threads/t1/modify": modify})))
+    client.unlabel_thread("t1", ["STARRED"])
+
+    assert seen["body"] == {"removeLabelIds": ["STARRED"]}
+
+
+def test_trash_and_untrash_thread_hit_distinct_endpoints(credentials):
+    client = GmailClient(
+        credentials,
+        make_client(
+            routed(
+                {
+                    "/threads/t1/trash": httpx.Response(200, json={"id": "t1"}),
+                    "/threads/t1/untrash": httpx.Response(200, json={"id": "t1"}),
+                }
+            )
+        ),
+    )
+
+    assert client.trash_thread("t1")["id"] == "t1"
+    assert client.untrash_thread("t1")["id"] == "t1"
+
+
+def test_mark_thread_spam_flips_spam_on_and_inbox_off(credentials):
+    seen = {}
+
+    def modify(request):
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"id": "t1"})
+
+    client = GmailClient(credentials, make_client(routed({"/threads/t1/modify": modify})))
+    client.mark_thread_spam("t1")
+
+    assert seen["body"] == {"addLabelIds": ["SPAM"], "removeLabelIds": ["INBOX"]}
+
+
+def test_unmark_thread_spam_flips_inbox_on_and_spam_off(credentials):
+    seen = {}
+
+    def modify(request):
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"id": "t1"})
+
+    client = GmailClient(credentials, make_client(routed({"/threads/t1/modify": modify})))
+    client.unmark_thread_spam("t1")
+
+    assert seen["body"] == {"addLabelIds": ["INBOX"], "removeLabelIds": ["SPAM"]}
+
+
 def test_summarise_can_omit_the_body():
     message = {
         "id": "m1",

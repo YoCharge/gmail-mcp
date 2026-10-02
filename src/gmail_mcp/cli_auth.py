@@ -22,12 +22,15 @@ from .auth import TOKEN_URL, AuthError
 
 AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 # readonly covers search/read; compose additionally lets this server create, update,
-# delete and send drafts. No scope change was needed to add send_draft — compose
-# already covered it — so the only new safety boundary is at the tool level: sending
-# always takes a draft_id for a draft the caller already composed and showed the user.
+# delete and send drafts (sending always takes a draft_id for a draft the caller
+# already composed and showed the user — see send_draft). modify is what lets it
+# add/remove labels and trash/untrash threads; it does NOT grant permanent delete,
+# which Gmail only allows under the much broader https://mail.google.com/ scope —
+# deliberately not requested here.
 SCOPE = (
     "https://www.googleapis.com/auth/gmail.readonly "
-    "https://www.googleapis.com/auth/gmail.compose"
+    "https://www.googleapis.com/auth/gmail.compose "
+    "https://www.googleapis.com/auth/gmail.modify"
 )
 PROFILE_URL = "https://gmail.googleapis.com/gmail/v1/users/me/profile"
 
@@ -189,7 +192,8 @@ def _describe_profile_failure(response: httpx.Response) -> str:
     elif response.status_code == 403:
         text += (
             "\n\nA 403 here usually means the Gmail API is not enabled on the project, "
-            "or the consent screen does not list the gmail.readonly and gmail.compose scopes."
+            "or the consent screen does not list the gmail.readonly, gmail.compose and "
+            "gmail.modify scopes."
         )
     return text
 

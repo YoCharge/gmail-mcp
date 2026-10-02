@@ -26,8 +26,13 @@ Composing and sending are two different tool calls, on purpose: `create_draft`,
 The one tool that can put a message in someone's inbox, `send_draft`, takes a
 `draft_id` rather than a fresh `to`/`subject`/`body` — so sending always means
 sending something the caller already has on screen, however that draft was composed.
-See [Sending](#sending) below for the confirmation step this depends on. It still
-cannot label, archive, trash or delete existing mail.
+See [Sending](#sending) below for the confirmation step this depends on.
+
+It can also label and trash threads (`label_thread`, `trash_thread`, and their
+undo counterparts `unlabel_thread`/`untrash_thread`). Trashing is reversible — Gmail
+keeps trashed mail for about 30 days. There is deliberately no permanent-delete tool:
+Gmail only exposes that under the much broader `https://mail.google.com/` scope
+(full account access), which this server does not request.
 
 ## Install
 
@@ -109,7 +114,7 @@ Refresh tokens are passwords. Keep your real config out of version control — t
 
 ## Tools
 
-Thirteen, each named with its mailbox in the description.
+Twenty, each named with its mailbox in the description.
 
 | Tool | Does |
 |---|---|
@@ -126,6 +131,13 @@ Thirteen, each named with its mailbox in the description.
 | `send_draft(draft_id)` | Sends an existing draft. **Irreversible** — see [Sending](#sending) |
 | `create_reply_draft(message_id, body?, reply_all?, to?, cc?, bcc?)` | Drafts a threaded reply to a message |
 | `create_forward_draft(message_id, to, body?, cc?, bcc?)` | Drafts a forward quoting the original. No attachments carried over |
+| `label_thread(thread_id, label_ids)` | Adds one or more labels to a thread |
+| `unlabel_thread(thread_id, label_ids)` | Removes one or more labels from a thread |
+| `trash_thread(thread_id)` | Moves a thread to Trash. Reversible — recover with `untrash_thread` |
+| `untrash_thread(thread_id)` | Recovers a trashed thread |
+| `apply_sensitive_thread_label(thread_id, label_option)` | `label_option`: `TRASH` (= `trash_thread`) or `SPAM` (= `mark_thread_spam`) |
+| `mark_thread_spam(thread_id)` | Marks a thread as spam. Reversible — recover with `unmark_thread_spam` |
+| `unmark_thread_spam(thread_id)` | Undoes `mark_thread_spam` |
 
 `download_attachment` requires a destination: either `dest_dir` on the call, or
 `GMAIL_MCP_DOWNLOAD_DIR` in the environment. It will not guess a directory. Filenames

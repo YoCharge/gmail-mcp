@@ -99,16 +99,20 @@ Pick the user type:
 > everything is broken". If you must use External, publish the app to move out of
 > Testing, or accept re-authorizing weekly.
 
-Add both scopes:
+Add all three scopes:
 
 - `https://www.googleapis.com/auth/gmail.readonly`
 - `https://www.googleapis.com/auth/gmail.compose`
+- `https://www.googleapis.com/auth/gmail.modify`
 
 Those are the only scopes this server uses. `gmail.compose` is what lets it create,
-update, delete and send drafts. Composing and sending are still two separate tool
-calls — see the README's [Sending](../README.md#sending) section — so there is no
-single call that both writes and sends a message. It still cannot reply, forward,
-label or delete existing mail.
+update, delete and send drafts (including replies and forwards, which are also just
+drafts). Composing and sending are still two separate tool calls — see the README's
+[Sending](../README.md#sending) section — so there is no single call that both writes
+and sends a message. `gmail.modify` is what lets it label and trash/untrash threads.
+There is deliberately no permanent-delete tool: Gmail only allows that under the much
+broader `https://mail.google.com/` scope (full account access), which is not
+requested here.
 
 ## 4. Create the OAuth client and get the client ID and secret
 
@@ -230,7 +234,7 @@ gmail-mcp
 A working setup prints one line to stderr and then waits for MCP traffic on stdin:
 
 ```
-gmail-mcp: serving you@example.com (read, drafts, send-with-confirmation)
+gmail-mcp: serving you@example.com (read, drafts, send-with-confirmation, label/trash)
 ```
 
 That line means the refresh token was exchanged **and** the mailbox identity was
@@ -277,7 +281,8 @@ new Desktop client.
 **`403 accessNotConfigured`**
 Same as the first entry: the Gmail API is not enabled on the project.
 
-**Draft tools fail with `insufficient authentication scopes` even though search/read tools work**
-The refresh token was issued before `gmail.compose` was added to the consent screen
-and this flow. Re-run `gmail-mcp-auth you@example.com` to get a new refresh token that
-covers both scopes, and update that mailbox's `GMAIL_REFRESH_TOKEN`.
+**A tool fails with `insufficient authentication scopes` even though other tools work**
+The refresh token was issued before `gmail.compose` or `gmail.modify` was added to
+this flow (draft tools need `gmail.compose`; `label_thread`/`trash_thread`/etc. need
+`gmail.modify`). Re-run `gmail-mcp-auth you@example.com` to get a new refresh token
+covering all three scopes, and update that mailbox's `GMAIL_REFRESH_TOKEN`.

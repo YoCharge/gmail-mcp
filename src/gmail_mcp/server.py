@@ -111,6 +111,13 @@ TOOL_NAMES = (
     "send_draft",
     "create_reply_draft",
     "create_forward_draft",
+    "label_thread",
+    "unlabel_thread",
+    "trash_thread",
+    "untrash_thread",
+    "apply_sensitive_thread_label",
+    "mark_thread_spam",
+    "unmark_thread_spam",
 )
 
 
@@ -177,6 +184,34 @@ def tool_descriptions(account: str) -> dict[str, str]:
             f"is prefixed with 'Fwd:' if needed. Does NOT carry over the original's "
             f"attachments. Only writes to the Drafts folder — send via send_draft "
             f"after confirmation, same as every other draft here."
+        ),
+        "label_thread": (
+            f"Add one or more labels to a thread in {account}. label_ids are Gmail "
+            f"label ids — use list_labels to find user-defined ones, or pass a system "
+            f"label directly (e.g. STARRED, IMPORTANT, UNREAD)."
+        ),
+        "unlabel_thread": (
+            f"Remove one or more labels from a thread in {account}. Same label_ids as "
+            f"label_thread."
+        ),
+        "trash_thread": (
+            f"Move a thread in {account} to Trash. Reversible — Gmail keeps trashed "
+            f"mail for about 30 days; call untrash_thread to recover it."
+        ),
+        "untrash_thread": f"Recover a trashed thread in {account} back to its previous location.",
+        "apply_sensitive_thread_label": (
+            f"Apply a sensitive label to a thread in {account}. label_option is "
+            f"'TRASH' (same as trash_thread — reversible, undo with untrash_thread) "
+            f"or 'SPAM' (same as mark_thread_spam — reversible, undo with "
+            f"unmark_thread_spam)."
+        ),
+        "mark_thread_spam": (
+            f"Mark a thread in {account} as spam — flips the SPAM label on and INBOX "
+            f"off. Reversible — undo with unmark_thread_spam."
+        ),
+        "unmark_thread_spam": (
+            f"Undo mark_thread_spam on a thread in {account} — flips INBOX back on "
+            f"and SPAM off."
         ),
     }
 
@@ -397,6 +432,57 @@ def _dispatch(client: GmailClient, account: str, download_dir: str | None,
             indent=2,
         )
 
+    if name == "label_thread":
+        client.label_thread(arguments["thread_id"], arguments["label_ids"])
+        return json.dumps(
+            {"account": account, "thread_id": arguments["thread_id"], "added": arguments["label_ids"]},
+            indent=2,
+        )
+
+    if name == "unlabel_thread":
+        client.unlabel_thread(arguments["thread_id"], arguments["label_ids"])
+        return json.dumps(
+            {"account": account, "thread_id": arguments["thread_id"], "removed": arguments["label_ids"]},
+            indent=2,
+        )
+
+    if name == "trash_thread":
+        client.trash_thread(arguments["thread_id"])
+        return json.dumps(
+            {"account": account, "thread_id": arguments["thread_id"], "trashed": True}, indent=2
+        )
+
+    if name == "untrash_thread":
+        client.untrash_thread(arguments["thread_id"])
+        return json.dumps(
+            {"account": account, "thread_id": arguments["thread_id"], "trashed": False}, indent=2
+        )
+
+    if name == "apply_sensitive_thread_label":
+        thread_id = arguments["thread_id"]
+        label_option = arguments["label_option"]
+        if label_option == "TRASH":
+            client.trash_thread(thread_id)
+        elif label_option == "SPAM":
+            client.mark_thread_spam(thread_id)
+        else:
+            raise ValueError(f"Unknown label_option: {label_option!r}. Use 'TRASH' or 'SPAM'.")
+        return json.dumps(
+            {"account": account, "thread_id": thread_id, "label_option": label_option}, indent=2
+        )
+
+    if name == "mark_thread_spam":
+        client.mark_thread_spam(arguments["thread_id"])
+        return json.dumps(
+            {"account": account, "thread_id": arguments["thread_id"], "spam": True}, indent=2
+        )
+
+    if name == "unmark_thread_spam":
+        client.unmark_thread_spam(arguments["thread_id"])
+        return json.dumps(
+            {"account": account, "thread_id": arguments["thread_id"], "spam": False}, indent=2
+        )
+
     raise ValueError(f"Unknown tool: {name}")
 
 
@@ -525,6 +611,29 @@ def build_server(client: GmailClient, account: str, download_dir: str | None) ->
             {"message_id": message_id, "to": to, "body": body, "cc": cc, "bcc": bcc},
         )
 
+    async def label_thread(thread_id: str, label_ids: list[str]) -> str:
+        return await run_tool("label_thread", {"thread_id": thread_id, "label_ids": label_ids})
+
+    async def unlabel_thread(thread_id: str, label_ids: list[str]) -> str:
+        return await run_tool("unlabel_thread", {"thread_id": thread_id, "label_ids": label_ids})
+
+    async def trash_thread(thread_id: str) -> str:
+        return await run_tool("trash_thread", {"thread_id": thread_id})
+
+    async def untrash_thread(thread_id: str) -> str:
+        return await run_tool("untrash_thread", {"thread_id": thread_id})
+
+    async def apply_sensitive_thread_label(thread_id: str, label_option: str) -> str:
+        return await run_tool(
+            "apply_sensitive_thread_label", {"thread_id": thread_id, "label_option": label_option}
+        )
+
+    async def mark_thread_spam(thread_id: str) -> str:
+        return await run_tool("mark_thread_spam", {"thread_id": thread_id})
+
+    async def unmark_thread_spam(thread_id: str) -> str:
+        return await run_tool("unmark_thread_spam", {"thread_id": thread_id})
+
     for function in (
         search_threads,
         get_thread,
@@ -539,6 +648,13 @@ def build_server(client: GmailClient, account: str, download_dir: str | None) ->
         send_draft,
         create_reply_draft,
         create_forward_draft,
+        label_thread,
+        unlabel_thread,
+        trash_thread,
+        untrash_thread,
+        apply_sensitive_thread_label,
+        mark_thread_spam,
+        unmark_thread_spam,
     ):
         server.add_tool(
             function,
@@ -556,7 +672,10 @@ async def _serve() -> None:
     client = GmailClient(credentials, client=http)
 
     resolved = assert_account(client, account)
-    print(f"gmail-mcp: serving {resolved} (read, drafts, send-with-confirmation)", file=sys.stderr)
+    print(
+        f"gmail-mcp: serving {resolved} (read, drafts, send-with-confirmation, label/trash)",
+        file=sys.stderr,
+    )
 
     server = build_server(client, account, download_dir)
     await server.run_stdio_async()

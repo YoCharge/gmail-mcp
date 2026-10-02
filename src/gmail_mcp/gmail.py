@@ -1,11 +1,11 @@
 """A thin Gmail REST client.
 
-Read surface plus draft management, including replying and forwarding. Both of those
-are compose-only: they build a draft (via create_draft) threaded to or quoting an
-existing message, nothing more. There is still deliberately no label or trash call
-here, and still only one way to actually send anything — send_draft, by draft id —
-so replying and forwarding pass through the same confirm-before-send gate as every
-other draft.
+Read surface, draft management (including replying and forwarding, both compose-only
+via create_draft), and thread labeling/trashing. Still only one way to actually send
+anything — send_draft, by draft id — so replying and forwarding pass through the same
+confirm-before-send gate as every other draft. Trashing a thread is reversible (Gmail
+keeps it ~30 days, undo with untrash_thread); there is deliberately no permanent-delete
+call, which Gmail only allows under the much broader https://mail.google.com/ scope.
 """
 
 from __future__ import annotations
@@ -130,6 +130,38 @@ class GmailClient:
     def send_draft(self, draft_id: str) -> dict:
         """Send an existing draft. Irreversible — the message leaves the mailbox."""
         return self._write("POST", "/drafts/send", {"id": draft_id})
+
+    # -- thread labeling and trash --------------------------------------------
+    #
+    # trash/untrash are a reversible pair: Gmail keeps trashed mail ~30 days, and
+    # untrash_thread undoes trash_thread exactly. There is no permanent-delete call;
+    # Gmail only exposes that under the much broader https://mail.google.com/ scope.
+
+    def label_thread(self, thread_id: str, label_ids: list[str]) -> dict:
+        return self._write("POST", f"/threads/{thread_id}/modify", {"addLabelIds": label_ids})
+
+    def unlabel_thread(self, thread_id: str, label_ids: list[str]) -> dict:
+        return self._write("POST", f"/threads/{thread_id}/modify", {"removeLabelIds": label_ids})
+
+    def trash_thread(self, thread_id: str) -> dict:
+        return self._write("POST", f"/threads/{thread_id}/trash")
+
+    def mark_thread_spam(self, thread_id: str) -> dict:
+        """Flip SPAM on and INBOX off. Undo with unmark_thread_spam."""
+        return self._write(
+            "POST", f"/threads/{thread_id}/modify",
+            {"addLabelIds": ["SPAM"], "removeLabelIds": ["INBOX"]},
+        )
+
+    def unmark_thread_spam(self, thread_id: str) -> dict:
+        """Flip INBOX on and SPAM off — undoes mark_thread_spam exactly."""
+        return self._write(
+            "POST", f"/threads/{thread_id}/modify",
+            {"addLabelIds": ["INBOX"], "removeLabelIds": ["SPAM"]},
+        )
+
+    def untrash_thread(self, thread_id: str) -> dict:
+        return self._write("POST", f"/threads/{thread_id}/untrash")
 
 
 def _bearer(token: str) -> dict[str, str]:

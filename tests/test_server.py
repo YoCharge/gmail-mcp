@@ -119,8 +119,22 @@ def test_sending_is_only_possible_through_an_already_composed_draft():
         "send_draft",
         "create_reply_draft",
         "create_forward_draft",
+        "label_thread",
+        "unlabel_thread",
+        "trash_thread",
+        "untrash_thread",
+        "apply_sensitive_thread_label",
+        "mark_thread_spam",
+        "unmark_thread_spam",
     }
-    for forbidden in ("send_message", "reply", "forward", "trash", "label_message"):
+    for forbidden in ("send_message", "reply", "forward", "label_message"):
+        assert forbidden not in names
+
+
+def test_there_is_no_permanent_delete():
+    """trash_thread is reversible; nothing here calls the bypass-Trash delete endpoint."""
+    names = set(TOOL_NAMES)
+    for forbidden in ("delete_thread", "delete_message", "permanently_delete"):
         assert forbidden not in names
 
 
@@ -408,3 +422,174 @@ def test_create_forward_draft_quotes_the_original_and_starts_a_new_thread(creden
     assert "FYI" in raw
     assert "From: Alice <alice@example.com>" in raw
     assert "Hi there" in raw
+
+
+# -- thread labeling and trash -----------------------------------------------
+
+
+def test_label_thread_posts_the_add_label_ids(credentials):
+    seen = {}
+
+    def handler(request):
+        url = str(request.url)
+        if "oauth2.googleapis.com" in url:
+            return httpx.Response(200, json={"access_token": "tok", "expires_in": 3600})
+        if "/threads/t1/modify" in url:
+            seen["body"] = json.loads(request.content)
+            return httpx.Response(200, json={"id": "t1"})
+        return httpx.Response(404, json={"error": {"message": "unexpected"}})
+
+    client = GmailClient(credentials, make_client(handler))
+    result = json.loads(
+        _dispatch(
+            client, "you@example.com", None, "label_thread",
+            {"thread_id": "t1", "label_ids": ["STARRED"]},
+        )
+    )
+
+    assert result["added"] == ["STARRED"]
+    assert seen["body"] == {"addLabelIds": ["STARRED"]}
+
+
+def test_unlabel_thread_posts_the_remove_label_ids(credentials):
+    seen = {}
+
+    def handler(request):
+        url = str(request.url)
+        if "oauth2.googleapis.com" in url:
+            return httpx.Response(200, json={"access_token": "tok", "expires_in": 3600})
+        if "/threads/t1/modify" in url:
+            seen["body"] = json.loads(request.content)
+            return httpx.Response(200, json={"id": "t1"})
+        return httpx.Response(404, json={"error": {"message": "unexpected"}})
+
+    client = GmailClient(credentials, make_client(handler))
+    result = json.loads(
+        _dispatch(
+            client, "you@example.com", None, "unlabel_thread",
+            {"thread_id": "t1", "label_ids": ["STARRED"]},
+        )
+    )
+
+    assert result["removed"] == ["STARRED"]
+    assert seen["body"] == {"removeLabelIds": ["STARRED"]}
+
+
+def test_trash_thread_and_untrash_thread_hit_their_own_endpoints(credentials):
+    hits = []
+
+    def handler(request):
+        url = str(request.url)
+        if "oauth2.googleapis.com" in url:
+            return httpx.Response(200, json={"access_token": "tok", "expires_in": 3600})
+        if "/threads/t1/trash" in url or "/threads/t1/untrash" in url:
+            hits.append(url)
+            return httpx.Response(200, json={"id": "t1"})
+        return httpx.Response(404, json={"error": {"message": "unexpected"}})
+
+    client = GmailClient(credentials, make_client(handler))
+
+    trashed = json.loads(_dispatch(client, "you@example.com", None, "trash_thread", {"thread_id": "t1"}))
+    restored = json.loads(_dispatch(client, "you@example.com", None, "untrash_thread", {"thread_id": "t1"}))
+
+    assert trashed["trashed"] is True
+    assert restored["trashed"] is False
+    assert any(h.endswith("/threads/t1/trash") for h in hits)
+    assert any(h.endswith("/threads/t1/untrash") for h in hits)
+
+
+def test_apply_sensitive_thread_label_trash_routes_to_the_trash_endpoint(credentials):
+    hit = {"path": None}
+
+    def handler(request):
+        url = str(request.url)
+        if "oauth2.googleapis.com" in url:
+            return httpx.Response(200, json={"access_token": "tok", "expires_in": 3600})
+        hit["path"] = url
+        return httpx.Response(200, json={"id": "t1"})
+
+    client = GmailClient(credentials, make_client(handler))
+    result = json.loads(
+        _dispatch(
+            client, "you@example.com", None, "apply_sensitive_thread_label",
+            {"thread_id": "t1", "label_option": "TRASH"},
+        )
+    )
+
+    assert result["label_option"] == "TRASH"
+    assert hit["path"].endswith("/threads/t1/trash")
+
+
+def test_apply_sensitive_thread_label_spam_routes_to_modify_with_spam_inbox_flip(credentials):
+    seen = {}
+
+    def handler(request):
+        url = str(request.url)
+        if "oauth2.googleapis.com" in url:
+            return httpx.Response(200, json={"access_token": "tok", "expires_in": 3600})
+        if "/threads/t1/modify" in url:
+            seen["body"] = json.loads(request.content)
+            return httpx.Response(200, json={"id": "t1"})
+        return httpx.Response(404, json={"error": {"message": "unexpected"}})
+
+    client = GmailClient(credentials, make_client(handler))
+    result = json.loads(
+        _dispatch(
+            client, "you@example.com", None, "apply_sensitive_thread_label",
+            {"thread_id": "t1", "label_option": "SPAM"},
+        )
+    )
+
+    assert result["label_option"] == "SPAM"
+    assert seen["body"] == {"addLabelIds": ["SPAM"], "removeLabelIds": ["INBOX"]}
+
+
+def test_apply_sensitive_thread_label_rejects_an_unknown_option(credentials):
+    client = GmailClient(credentials, make_client(lambda r: httpx.Response(200, json={})))
+    with pytest.raises(ValueError, match="Unknown label_option"):
+        _dispatch(
+            client, "you@example.com", None, "apply_sensitive_thread_label",
+            {"thread_id": "t1", "label_option": "BOGUS"},
+        )
+
+
+def test_mark_thread_spam_reports_spam_true(credentials):
+    seen = {}
+
+    def handler(request):
+        url = str(request.url)
+        if "oauth2.googleapis.com" in url:
+            return httpx.Response(200, json={"access_token": "tok", "expires_in": 3600})
+        if "/threads/t1/modify" in url:
+            seen["body"] = json.loads(request.content)
+            return httpx.Response(200, json={"id": "t1"})
+        return httpx.Response(404, json={"error": {"message": "unexpected"}})
+
+    client = GmailClient(credentials, make_client(handler))
+    result = json.loads(
+        _dispatch(client, "you@example.com", None, "mark_thread_spam", {"thread_id": "t1"})
+    )
+
+    assert result["spam"] is True
+    assert seen["body"] == {"addLabelIds": ["SPAM"], "removeLabelIds": ["INBOX"]}
+
+
+def test_unmark_thread_spam_reports_spam_false(credentials):
+    seen = {}
+
+    def handler(request):
+        url = str(request.url)
+        if "oauth2.googleapis.com" in url:
+            return httpx.Response(200, json={"access_token": "tok", "expires_in": 3600})
+        if "/threads/t1/modify" in url:
+            seen["body"] = json.loads(request.content)
+            return httpx.Response(200, json={"id": "t1"})
+        return httpx.Response(404, json={"error": {"message": "unexpected"}})
+
+    client = GmailClient(credentials, make_client(handler))
+    result = json.loads(
+        _dispatch(client, "you@example.com", None, "unmark_thread_spam", {"thread_id": "t1"})
+    )
+
+    assert result["spam"] is False
+    assert seen["body"] == {"addLabelIds": ["INBOX"], "removeLabelIds": ["SPAM"]}
