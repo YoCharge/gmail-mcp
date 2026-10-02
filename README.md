@@ -1,7 +1,7 @@
 # gmail-mcp
 
-An MCP server that gives an AI agent **read access and draft management for Gmail, one
-mailbox per process — and no way to send mail.**
+An MCP server that gives an AI agent **read access, draft management, and confirmed
+sending for Gmail, one mailbox per process.**
 
 Most multi-account Gmail servers hold every account in a single process. This one does
 the opposite: each server instance is configured with exactly one mailbox and one
@@ -21,12 +21,12 @@ That choice is the whole point:
   endpoint and compares the address against the one it was configured with. Mismatch
   means exit, not a server quietly serving the wrong inbox under the right name.
 
-The absence of sending is enforced by what the server does, not by policy: it requests
-`gmail.readonly` and `gmail.compose`, nothing else, and no tool here calls the send
-endpoint. It can read mail and create/update/delete drafts, but a draft sits in the
-Drafts folder until a human opens Gmail and sends it — this process has no code path
-that puts a message in anyone's inbox. It still cannot reply, forward, label, archive
-or delete existing mail.
+Composing and sending are two different tool calls, on purpose: `create_draft` only
+ever writes to the Drafts folder. The one tool that can put a message in someone's
+inbox, `send_draft`, takes a `draft_id` rather than a fresh `to`/`subject`/`body` — so
+sending always means sending something the caller already has on screen. See
+[Sending](#sending) below for the confirmation step this depends on. It still cannot
+reply, forward, label, archive, trash or delete existing mail.
 
 ## Install
 
@@ -108,7 +108,7 @@ Refresh tokens are passwords. Keep your real config out of version control — t
 
 ## Tools
 
-Ten, each named with its mailbox in the description.
+Eleven, each named with its mailbox in the description.
 
 | Tool | Does |
 |---|---|
@@ -122,11 +122,29 @@ Ten, each named with its mailbox in the description.
 | `create_draft(to, subject?, body?, cc?, bcc?, thread_id?)` | Writes a new draft. Never sent automatically |
 | `update_draft(draft_id, to, subject?, body?, cc?, bcc?, thread_id?)` | Replaces an existing draft's contents |
 | `delete_draft(draft_id)` | Deletes a draft. Cannot be undone |
+| `send_draft(draft_id)` | Sends an existing draft. **Irreversible** — see [Sending](#sending) |
 
 `download_attachment` requires a destination: either `dest_dir` on the call, or
 `GMAIL_MCP_DOWNLOAD_DIR` in the environment. It will not guess a directory. Filenames
 supplied by the sender are reduced to their final path component, so an attachment
 named `../../.ssh/authorized_keys` writes as `authorized_keys`.
+
+## Sending
+
+Composing and sending are deliberately two separate tools:
+
+1. `create_draft` (or `update_draft`) writes to the Drafts folder and echoes back the
+   exact `to`/`subject`/`body`/`cc`/`bcc` it just wrote, together with a `draft_id`.
+2. `send_draft(draft_id)` is the only call in this server that can put a message in
+   someone's inbox. It takes just the id — not the content — so there is no way to
+   compose and send in a single tool call.
+
+That split exists so an agent (or the human driving it) always has a concrete draft
+to review between "write this email" and "send it". Nothing here enforces that a human
+actually looks at step 1's output before step 2 runs — that enforcement is the calling
+agent's and MCP client's job (e.g. requiring approval before `send_draft` specifically)
+— but the tool boundary makes that enforcement possible to add, where a single
+`send_message(to, subject, body)` tool would not.
 
 ## Untrusted content
 

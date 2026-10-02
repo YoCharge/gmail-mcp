@@ -97,6 +97,7 @@ TOOL_NAMES = (
     "create_draft",
     "update_draft",
     "delete_draft",
+    "send_draft",
 )
 
 
@@ -131,14 +132,23 @@ def tool_descriptions(account: str) -> dict[str, str]:
         "create_draft": (
             f"Create a new draft in {account} with the given to/subject/body (and "
             f"optional cc/bcc). Pass thread_id to draft a reply inside an existing "
-            f"thread. This only writes to the Drafts folder — it never sends anything; "
-            f"a human must open Gmail and send it."
+            f"thread. This only writes to the Drafts folder — it does not send anything "
+            f"by itself. To actually send it, show the user the exact to/subject/body "
+            f"from this call's result, get their explicit go-ahead, and only then call "
+            f"send_draft with the returned draft_id."
         ),
         "update_draft": (
             f"Replace the to/subject/body/cc/bcc of an existing draft in {account}. "
-            f"Still never sends anything."
+            f"Still does not send anything."
         ),
         "delete_draft": f"Delete a draft in {account} by id. This cannot be undone.",
+        "send_draft": (
+            f"Send an existing draft in {account} by draft_id. THIS IS IRREVERSIBLE — "
+            f"the message leaves the mailbox and lands in the recipient's inbox. Call "
+            f"this only after create_draft (or get_draft) has shown the exact "
+            f"to/subject/body and the user has explicitly confirmed they want it sent. "
+            f"Never call this in the same turn as create_draft without that confirmation."
+        ),
     }
 
 
@@ -256,7 +266,20 @@ def _dispatch(client: GmailClient, account: str, download_dir: str | None,
             bcc=arguments.get("bcc"),
         )
         draft = client.create_draft(raw, thread_id=arguments.get("thread_id"))
-        return json.dumps({"account": account, "draft_id": draft.get("id")}, indent=2)
+        return json.dumps(
+            {
+                "account": account,
+                "draft_id": draft.get("id"),
+                # Echoed back so the caller has the exact content to show the user
+                # before ever calling send_draft — no extra get_draft round trip needed.
+                "to": arguments["to"],
+                "subject": arguments.get("subject", ""),
+                "body": arguments.get("body", ""),
+                "cc": arguments.get("cc"),
+                "bcc": arguments.get("bcc"),
+            },
+            indent=2,
+        )
 
     if name == "update_draft":
         raw = build_mime_message(
@@ -269,11 +292,33 @@ def _dispatch(client: GmailClient, account: str, download_dir: str | None,
         draft = client.update_draft(
             arguments["draft_id"], raw, thread_id=arguments.get("thread_id")
         )
-        return json.dumps({"account": account, "draft_id": draft.get("id")}, indent=2)
+        return json.dumps(
+            {
+                "account": account,
+                "draft_id": draft.get("id"),
+                "to": arguments["to"],
+                "subject": arguments.get("subject", ""),
+                "body": arguments.get("body", ""),
+                "cc": arguments.get("cc"),
+                "bcc": arguments.get("bcc"),
+            },
+            indent=2,
+        )
 
     if name == "delete_draft":
         client.delete_draft(arguments["draft_id"])
         return json.dumps({"account": account, "deleted": arguments["draft_id"]}, indent=2)
+
+    if name == "send_draft":
+        result = client.send_draft(arguments["draft_id"])
+        return json.dumps(
+            {
+                "account": account,
+                "draft_id": arguments["draft_id"],
+                "sent_message_id": result.get("id"),
+            },
+            indent=2,
+        )
 
     raise ValueError(f"Unknown tool: {name}")
 
@@ -368,6 +413,9 @@ def build_server(client: GmailClient, account: str, download_dir: str | None) ->
     async def delete_draft(draft_id: str) -> str:
         return await run_tool("delete_draft", {"draft_id": draft_id})
 
+    async def send_draft(draft_id: str) -> str:
+        return await run_tool("send_draft", {"draft_id": draft_id})
+
     for function in (
         search_threads,
         get_thread,
@@ -379,6 +427,7 @@ def build_server(client: GmailClient, account: str, download_dir: str | None) ->
         create_draft,
         update_draft,
         delete_draft,
+        send_draft,
     ):
         server.add_tool(
             function,
@@ -396,7 +445,7 @@ async def _serve() -> None:
     client = GmailClient(credentials, client=http)
 
     resolved = assert_account(client, account)
-    print(f"gmail-mcp: serving {resolved} (read + drafts, never sends)", file=sys.stderr)
+    print(f"gmail-mcp: serving {resolved} (read, drafts, send-with-confirmation)", file=sys.stderr)
 
     server = build_server(client, account, download_dir)
     await server.run_stdio_async()

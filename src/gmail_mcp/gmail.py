@@ -1,9 +1,9 @@
 """A thin Gmail REST client.
 
-Read surface plus draft management. There is still deliberately no send, reply,
-forward, label or trash call here: a draft sits unsent until a human opens Gmail and
-sends it, so adding draft support does not give this process the ability to put a
-message in anyone's inbox on its own.
+Read surface plus draft management. There is still deliberately no reply, forward,
+label or trash call here. Sending exists, but only as send_draft: it sends an
+already-composed draft by id, never a fresh to/subject/body in one call — so sending
+anything always passes through a draft a caller can inspect first.
 """
 
 from __future__ import annotations
@@ -96,9 +96,12 @@ class GmailClient:
 
     # -- draft management ----------------------------------------------------
     #
-    # Drafts are never sent from here. Creating or updating one writes to the
-    # mailbox's Drafts folder only; putting a message in someone's inbox still
-    # requires a human to open Gmail and press send.
+    # Composing and sending are two different calls on purpose. create_draft only
+    # ever writes to the Drafts folder; send_draft is the one call in this entire
+    # client that can put a message in someone's inbox, and it takes a draft_id
+    # rather than a to/subject/body, so the caller must already have the exact
+    # content on screen (from create_draft's or get_draft's response) before they
+    # can send it — there is no path that composes and sends in one step.
 
     def list_drafts(self, max_results: int = 20) -> list[dict]:
         payload = self._get("/drafts", params={"maxResults": max(1, min(max_results, 500))})
@@ -121,6 +124,10 @@ class GmailClient:
 
     def delete_draft(self, draft_id: str) -> None:
         self._write("DELETE", f"/drafts/{draft_id}")
+
+    def send_draft(self, draft_id: str) -> dict:
+        """Send an existing draft. Irreversible — the message leaves the mailbox."""
+        return self._write("POST", "/drafts/send", {"id": draft_id})
 
 
 def _bearer(token: str) -> dict[str, str]:

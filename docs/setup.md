@@ -105,8 +105,9 @@ Add both scopes:
 - `https://www.googleapis.com/auth/gmail.compose`
 
 Those are the only scopes this server uses. `gmail.compose` is what lets it create,
-update and delete drafts — but no tool here calls the send endpoint, so there is no
-code path that puts a message in anyone's inbox. It still cannot reply, forward,
+update, delete and send drafts. Composing and sending are still two separate tool
+calls — see the README's [Sending](../README.md#sending) section — so there is no
+single call that both writes and sends a message. It still cannot reply, forward,
 label or delete existing mail.
 
 ## 4. Create the OAuth client and get the client ID and secret
@@ -229,7 +230,7 @@ gmail-mcp
 A working setup prints one line to stderr and then waits for MCP traffic on stdin:
 
 ```
-gmail-mcp: serving you@example.com (read + drafts, never sends)
+gmail-mcp: serving you@example.com (read, drafts, send-with-confirmation)
 ```
 
 That line means the refresh token was exchanged **and** the mailbox identity was

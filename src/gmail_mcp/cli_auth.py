@@ -21,9 +21,10 @@ import httpx
 from .auth import TOKEN_URL, AuthError
 
 AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
-# readonly covers search/read; compose additionally lets this server create, update
-# and delete drafts. compose technically permits sending drafts too, but no tool here
-# calls that endpoint, so this process has no code path that can send mail.
+# readonly covers search/read; compose additionally lets this server create, update,
+# delete and send drafts. No scope change was needed to add send_draft — compose
+# already covered it — so the only new safety boundary is at the tool level: sending
+# always takes a draft_id for a draft the caller already composed and showed the user.
 SCOPE = (
     "https://www.googleapis.com/auth/gmail.readonly "
     "https://www.googleapis.com/auth/gmail.compose"

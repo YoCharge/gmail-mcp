@@ -96,8 +96,8 @@ def test_every_tool_names_its_mailbox():
         assert "you@example.com" in text, f"{name} does not name its mailbox"
 
 
-def test_the_surface_has_no_send_capability():
-    """Drafts are allowed; nothing here can put a message in anyone's inbox."""
+def test_sending_is_only_possible_through_an_already_composed_draft():
+    """The only send-capable tool takes a draft_id, never a fresh to/subject/body."""
     names = set(TOOL_NAMES)
 
     assert names == {
@@ -111,8 +111,9 @@ def test_the_surface_has_no_send_capability():
         "create_draft",
         "update_draft",
         "delete_draft",
+        "send_draft",
     }
-    for forbidden in ("send", "reply", "forward", "trash", "label_message"):
+    for forbidden in ("send_message", "reply", "forward", "trash", "label_message"):
         assert forbidden not in names
 
 
@@ -277,3 +278,46 @@ def test_delete_draft_reports_what_was_deleted(credentials):
     )
 
     assert result["deleted"] == "d1"
+
+
+def test_create_draft_never_touches_the_send_endpoint(credentials):
+    """The composing call and the sending call must stay on separate endpoints."""
+    hit = {"send": False}
+
+    def handler(request):
+        url = str(request.url)
+        if "oauth2.googleapis.com" in url:
+            return httpx.Response(200, json={"access_token": "tok", "expires_in": 3600})
+        if "/drafts/send" in url:
+            hit["send"] = True
+            return httpx.Response(200, json={"id": "m1"})
+        if request.method == "POST" and url.endswith("/drafts"):
+            return httpx.Response(200, json={"id": "d1"})
+        return httpx.Response(404, json={"error": {"message": "unexpected"}})
+
+    client = GmailClient(credentials, make_client(handler))
+    _dispatch(
+        client, "you@example.com", None, "create_draft",
+        {"to": "a@example.com", "subject": "Hi", "body": "Hello"},
+    )
+
+    assert hit["send"] is False
+
+
+def test_send_draft_hits_the_send_endpoint_and_reports_the_sent_id(credentials):
+    def handler(request):
+        url = str(request.url)
+        if "oauth2.googleapis.com" in url:
+            return httpx.Response(200, json={"access_token": "tok", "expires_in": 3600})
+        if "/drafts/send" in url:
+            assert json.loads(request.content) == {"id": "d1"}
+            return httpx.Response(200, json={"id": "m1"})
+        return httpx.Response(404, json={"error": {"message": "unexpected"}})
+
+    client = GmailClient(credentials, make_client(handler))
+    result = json.loads(
+        _dispatch(client, "you@example.com", None, "send_draft", {"draft_id": "d1"})
+    )
+
+    assert result["draft_id"] == "d1"
+    assert result["sent_message_id"] == "m1"

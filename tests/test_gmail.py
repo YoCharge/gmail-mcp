@@ -203,6 +203,20 @@ def test_delete_draft_handles_the_empty_204_body(credentials):
     assert client.delete_draft("d1") is None
 
 
+def test_send_draft_posts_only_the_draft_id(credentials):
+    seen = {}
+
+    def send(request):
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"id": "m1"})
+
+    client = GmailClient(credentials, make_client(routed({"/drafts/send": send})))
+    result = client.send_draft("d1")
+
+    assert result["id"] == "m1"
+    assert seen["body"] == {"id": "d1"}
+
+
 def test_summarise_can_omit_the_body():
     message = {
         "id": "m1",
