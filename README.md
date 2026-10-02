@@ -1,6 +1,7 @@
 # gmail-mcp
 
-An MCP server that gives an AI agent **read-only access to Gmail, one mailbox per process.**
+An MCP server that gives an AI agent **read access and draft management for Gmail, one
+mailbox per process — and no way to send mail.**
 
 Most multi-account Gmail servers hold every account in a single process. This one does
 the opposite: each server instance is configured with exactly one mailbox and one
@@ -20,9 +21,12 @@ That choice is the whole point:
   endpoint and compares the address against the one it was configured with. Mismatch
   means exit, not a server quietly serving the wrong inbox under the right name.
 
-Read-only is enforced by the token, not by policy: the server requests
-`gmail.readonly` and nothing else, so it cannot send, reply, draft, label, archive or
-delete even if asked to.
+The absence of sending is enforced by what the server does, not by policy: it requests
+`gmail.readonly` and `gmail.compose`, nothing else, and no tool here calls the send
+endpoint. It can read mail and create/update/delete drafts, but a draft sits in the
+Drafts folder until a human opens Gmail and sends it — this process has no code path
+that puts a message in anyone's inbox. It still cannot reply, forward, label, archive
+or delete existing mail.
 
 ## Install
 
@@ -104,7 +108,7 @@ Refresh tokens are passwords. Keep your real config out of version control — t
 
 ## Tools
 
-Five, each named with its mailbox in the description.
+Ten, each named with its mailbox in the description.
 
 | Tool | Does |
 |---|---|
@@ -113,6 +117,11 @@ Five, each named with its mailbox in the description.
 | `get_message(message_id)` | One message |
 | `list_labels()` | Label names and ids |
 | `download_attachment(message_id, attachment_id, dest_dir?, filename?)` | Writes one attachment to disk |
+| `list_drafts(max_results=20)` | Draft ids and snippets |
+| `get_draft(draft_id)` | One draft's composed message |
+| `create_draft(to, subject?, body?, cc?, bcc?, thread_id?)` | Writes a new draft. Never sent automatically |
+| `update_draft(draft_id, to, subject?, body?, cc?, bcc?, thread_id?)` | Replaces an existing draft's contents |
+| `delete_draft(draft_id)` | Deletes a draft. Cannot be undone |
 
 `download_attachment` requires a destination: either `dest_dir` on the call, or
 `GMAIL_MCP_DOWNLOAD_DIR` in the environment. It will not guess a directory. Filenames

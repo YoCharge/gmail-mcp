@@ -1,9 +1,12 @@
+import json
+
 import httpx
 import pytest
 
 from gmail_mcp.gmail import (
     GmailClient,
     GmailError,
+    build_mime_message,
     decode_base64url,
     extract_body,
     header,
@@ -155,6 +158,49 @@ def test_attachments_are_listed_with_their_ids():
     assert len(attachments) == 1
     assert attachments[0]["attachment_id"] == "att-1"
     assert attachments[0]["filename"] == "invoice.pdf"
+
+
+def test_build_mime_message_includes_the_given_fields():
+    raw = build_mime_message(to="a@example.com", subject="Hi", body="hello", cc="b@example.com")
+    decoded = decode_base64url(raw)
+
+    assert "To: a@example.com" in decoded
+    assert "Cc: b@example.com" in decoded
+    assert "Subject: Hi" in decoded
+    assert "hello" in decoded
+    assert "From:" not in decoded
+
+
+# -- drafts -----------------------------------------------------------------
+
+
+def test_list_drafts_returns_the_drafts_list(credentials):
+    client = GmailClient(
+        credentials,
+        make_client(routed({"/drafts": httpx.Response(200, json={"drafts": [{"id": "d1"}]})})),
+    )
+    assert client.list_drafts() == [{"id": "d1"}]
+
+
+def test_create_draft_posts_the_raw_message(credentials):
+    seen = {}
+
+    def create(request):
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"id": "d1"})
+
+    client = GmailClient(credentials, make_client(routed({"/drafts": create})))
+    result = client.create_draft("raw-bytes", thread_id="t1")
+
+    assert result["id"] == "d1"
+    assert seen["body"] == {"message": {"raw": "raw-bytes", "threadId": "t1"}}
+
+
+def test_delete_draft_handles_the_empty_204_body(credentials):
+    client = GmailClient(
+        credentials, make_client(routed({"/drafts/d1": httpx.Response(204)}))
+    )
+    assert client.delete_draft("d1") is None
 
 
 def test_summarise_can_omit_the_body():

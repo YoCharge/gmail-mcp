@@ -1,7 +1,7 @@
 [project]
 name = "gmail-mcp"
-version = "0.1.0"
-description = "MCP server giving an AI agent read-only access to one Gmail mailbox per process."
+version = "0.2.0"
+description = "MCP server giving an AI agent read and draft access to one Gmail mailbox per process. Never sends."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }

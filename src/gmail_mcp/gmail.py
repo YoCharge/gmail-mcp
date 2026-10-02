@@ -1,13 +1,15 @@
 """A thin Gmail REST client.
 
-Only the read surface is implemented. There is deliberately no send, reply, draft,
-label or trash call here — and the gmail.readonly token this client carries could not
-perform them anyway.
+Read surface plus draft management. There is still deliberately no send, reply,
+forward, label or trash call here: a draft sits unsent until a human opens Gmail and
+sends it, so adding draft support does not give this process the ability to put a
+message in anyone's inbox on its own.
 """
 
 from __future__ import annotations
 
 import base64
+from email.message import EmailMessage
 from typing import Any, Iterator
 
 import httpx
@@ -49,6 +51,23 @@ class GmailClient:
 
         return response.json()
 
+    def _write(self, method: str, path: str, json_body: dict | None = None) -> dict:
+        """POST/PUT/DELETE with the same one-retry-after-refresh behaviour as _get."""
+        url = f"{API_ROOT}{path}"
+
+        token = self._credentials.access_token(self._http)
+        response = self._http.request(method, url, json=json_body, headers=_bearer(token))
+
+        if response.status_code == 401:
+            token = self._credentials.refresh(self._http)
+            response = self._http.request(method, url, json=json_body, headers=_bearer(token))
+
+        if response.status_code >= 400:
+            raise GmailError(_describe_failure(response))
+
+        # DELETE returns 204 with an empty body; nothing else here does.
+        return response.json() if response.content else {}
+
     # -- read surface ------------------------------------------------------
 
     def get_profile(self) -> dict:
@@ -75,6 +94,34 @@ class GmailClient:
         payload = self._get(f"/messages/{message_id}/attachments/{attachment_id}")
         return decode_base64url_bytes(payload.get("data", ""))
 
+    # -- draft management ----------------------------------------------------
+    #
+    # Drafts are never sent from here. Creating or updating one writes to the
+    # mailbox's Drafts folder only; putting a message in someone's inbox still
+    # requires a human to open Gmail and press send.
+
+    def list_drafts(self, max_results: int = 20) -> list[dict]:
+        payload = self._get("/drafts", params={"maxResults": max(1, min(max_results, 500))})
+        return payload.get("drafts", [])
+
+    def get_draft(self, draft_id: str) -> dict:
+        return self._get(f"/drafts/{draft_id}", params={"format": "full"})
+
+    def create_draft(self, raw_message: str, thread_id: str | None = None) -> dict:
+        message: dict[str, Any] = {"raw": raw_message}
+        if thread_id:
+            message["threadId"] = thread_id
+        return self._write("POST", "/drafts", {"message": message})
+
+    def update_draft(self, draft_id: str, raw_message: str, thread_id: str | None = None) -> dict:
+        message: dict[str, Any] = {"raw": raw_message}
+        if thread_id:
+            message["threadId"] = thread_id
+        return self._write("PUT", f"/drafts/{draft_id}", {"message": message})
+
+    def delete_draft(self, draft_id: str) -> None:
+        self._write("DELETE", f"/drafts/{draft_id}")
+
 
 def _bearer(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
@@ -96,6 +143,29 @@ def _describe_failure(response: httpx.Response) -> str:
 # Gmail nests message bodies in a parts tree and base64url-encodes every leaf.
 # These are pure functions so they can be tested against captured payloads without
 # any network involved.
+
+
+def build_mime_message(
+    to: str,
+    subject: str = "",
+    body: str = "",
+    cc: str | None = None,
+    bcc: str | None = None,
+) -> str:
+    """Build an RFC 822 message and base64url-encode it the way drafts.create expects.
+
+    From is left unset: Gmail fills it in as the authenticated mailbox, which is the
+    only address this token could plausibly send as.
+    """
+    message = EmailMessage()
+    message["To"] = to
+    if cc:
+        message["Cc"] = cc
+    if bcc:
+        message["Bcc"] = bcc
+    message["Subject"] = subject
+    message.set_content(body)
+    return base64.urlsafe_b64encode(message.as_bytes()).decode().rstrip("=")
 
 
 def decode_base64url(data: str) -> str:

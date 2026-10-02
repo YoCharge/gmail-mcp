@@ -21,7 +21,13 @@ import httpx
 from .auth import TOKEN_URL, AuthError
 
 AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
-SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
+# readonly covers search/read; compose additionally lets this server create, update
+# and delete drafts. compose technically permits sending drafts too, but no tool here
+# calls that endpoint, so this process has no code path that can send mail.
+SCOPE = (
+    "https://www.googleapis.com/auth/gmail.readonly "
+    "https://www.googleapis.com/auth/gmail.compose"
+)
 PROFILE_URL = "https://gmail.googleapis.com/gmail/v1/users/me/profile"
 
 # Served the moment the authorization code arrives, which is BEFORE the token
@@ -182,7 +188,7 @@ def _describe_profile_failure(response: httpx.Response) -> str:
     elif response.status_code == 403:
         text += (
             "\n\nA 403 here usually means the Gmail API is not enabled on the project, "
-            "or the consent screen does not list the gmail.readonly scope."
+            "or the consent screen does not list the gmail.readonly and gmail.compose scopes."
         )
     return text
 

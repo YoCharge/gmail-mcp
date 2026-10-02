@@ -18,7 +18,7 @@ from mcp.server import MCPServer
 
 from . import __version__
 from .auth import AuthError, Credentials
-from .gmail import GmailClient, GmailError, summarise_message
+from .gmail import GmailClient, GmailError, build_mime_message, summarise_message
 
 # Prepended to every tool result. Mail is attacker-writable: anyone can send a message
 # to a swept mailbox, so its contents are data to be reported on, never instructions
@@ -92,6 +92,11 @@ TOOL_NAMES = (
     "get_message",
     "list_labels",
     "download_attachment",
+    "list_drafts",
+    "get_draft",
+    "create_draft",
+    "update_draft",
+    "delete_draft",
 )
 
 
@@ -121,6 +126,19 @@ def tool_descriptions(account: str) -> dict[str, str]:
             f"Attachment ids come from get_thread or get_message. dest_dir may be "
             f"omitted only if GMAIL_MCP_DOWNLOAD_DIR is set."
         ),
+        "list_drafts": f"List drafts in {account} (ids and snippets).",
+        "get_draft": f"Read one draft from {account} by id, including its composed message.",
+        "create_draft": (
+            f"Create a new draft in {account} with the given to/subject/body (and "
+            f"optional cc/bcc). Pass thread_id to draft a reply inside an existing "
+            f"thread. This only writes to the Drafts folder — it never sends anything; "
+            f"a human must open Gmail and send it."
+        ),
+        "update_draft": (
+            f"Replace the to/subject/body/cc/bcc of an existing draft in {account}. "
+            f"Still never sends anything."
+        ),
+        "delete_draft": f"Delete a draft in {account} by id. This cannot be undone.",
     }
 
 
@@ -211,6 +229,52 @@ def _dispatch(client: GmailClient, account: str, download_dir: str | None,
             {"account": account, "path": str(destination), "bytes": len(data)}, indent=2
         )
 
+    if name == "list_drafts":
+        drafts = client.list_drafts(max_results=int(arguments.get("max_results", 20)))
+        return json.dumps(
+            {"account": account, "count": len(drafts), "drafts": drafts}, indent=2
+        )
+
+    if name == "get_draft":
+        draft = client.get_draft(arguments["draft_id"])
+        message = draft.get("message") or {}
+        return json.dumps(
+            {
+                "account": account,
+                "draft_id": draft.get("id"),
+                "message": summarise_message(message) if message else None,
+            },
+            indent=2,
+        )
+
+    if name == "create_draft":
+        raw = build_mime_message(
+            to=arguments["to"],
+            subject=arguments.get("subject", ""),
+            body=arguments.get("body", ""),
+            cc=arguments.get("cc"),
+            bcc=arguments.get("bcc"),
+        )
+        draft = client.create_draft(raw, thread_id=arguments.get("thread_id"))
+        return json.dumps({"account": account, "draft_id": draft.get("id")}, indent=2)
+
+    if name == "update_draft":
+        raw = build_mime_message(
+            to=arguments["to"],
+            subject=arguments.get("subject", ""),
+            body=arguments.get("body", ""),
+            cc=arguments.get("cc"),
+            bcc=arguments.get("bcc"),
+        )
+        draft = client.update_draft(
+            arguments["draft_id"], raw, thread_id=arguments.get("thread_id")
+        )
+        return json.dumps({"account": account, "draft_id": draft.get("id")}, indent=2)
+
+    if name == "delete_draft":
+        client.delete_draft(arguments["draft_id"])
+        return json.dumps({"account": account, "deleted": arguments["draft_id"]}, indent=2)
+
     raise ValueError(f"Unknown tool: {name}")
 
 
@@ -260,7 +324,62 @@ def build_server(client: GmailClient, account: str, download_dir: str | None) ->
             },
         )
 
-    for function in (search_threads, get_thread, get_message, list_labels, download_attachment):
+    async def list_drafts(max_results: int = 20) -> str:
+        return await run_tool("list_drafts", {"max_results": max_results})
+
+    async def get_draft(draft_id: str) -> str:
+        return await run_tool("get_draft", {"draft_id": draft_id})
+
+    async def create_draft(
+        to: str,
+        subject: str = "",
+        body: str = "",
+        cc: str | None = None,
+        bcc: str | None = None,
+        thread_id: str | None = None,
+    ) -> str:
+        return await run_tool(
+            "create_draft",
+            {"to": to, "subject": subject, "body": body, "cc": cc, "bcc": bcc, "thread_id": thread_id},
+        )
+
+    async def update_draft(
+        draft_id: str,
+        to: str,
+        subject: str = "",
+        body: str = "",
+        cc: str | None = None,
+        bcc: str | None = None,
+        thread_id: str | None = None,
+    ) -> str:
+        return await run_tool(
+            "update_draft",
+            {
+                "draft_id": draft_id,
+                "to": to,
+                "subject": subject,
+                "body": body,
+                "cc": cc,
+                "bcc": bcc,
+                "thread_id": thread_id,
+            },
+        )
+
+    async def delete_draft(draft_id: str) -> str:
+        return await run_tool("delete_draft", {"draft_id": draft_id})
+
+    for function in (
+        search_threads,
+        get_thread,
+        get_message,
+        list_labels,
+        download_attachment,
+        list_drafts,
+        get_draft,
+        create_draft,
+        update_draft,
+        delete_draft,
+    ):
         server.add_tool(
             function,
             name=function.__name__,
@@ -277,7 +396,7 @@ async def _serve() -> None:
     client = GmailClient(credentials, client=http)
 
     resolved = assert_account(client, account)
-    print(f"gmail-mcp: serving {resolved} (read-only)", file=sys.stderr)
+    print(f"gmail-mcp: serving {resolved} (read + drafts, never sends)", file=sys.stderr)
 
     server = build_server(client, account, download_dir)
     await server.run_stdio_async()

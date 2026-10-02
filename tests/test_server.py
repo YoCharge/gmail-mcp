@@ -3,7 +3,7 @@ import json
 import httpx
 import pytest
 
-from gmail_mcp.gmail import GmailClient
+from gmail_mcp.gmail import GmailClient, decode_base64url
 from gmail_mcp.server import (
     TOOL_NAMES,
     ConfigError,
@@ -96,7 +96,8 @@ def test_every_tool_names_its_mailbox():
         assert "you@example.com" in text, f"{name} does not name its mailbox"
 
 
-def test_the_surface_is_read_only():
+def test_the_surface_has_no_send_capability():
+    """Drafts are allowed; nothing here can put a message in anyone's inbox."""
     names = set(TOOL_NAMES)
 
     assert names == {
@@ -105,8 +106,13 @@ def test_the_surface_is_read_only():
         "get_message",
         "list_labels",
         "download_attachment",
+        "list_drafts",
+        "get_draft",
+        "create_draft",
+        "update_draft",
+        "delete_draft",
     }
-    for forbidden in ("send", "reply", "forward", "draft", "trash", "label_message"):
+    for forbidden in ("send", "reply", "forward", "trash", "label_message"):
         assert forbidden not in names
 
 
@@ -211,3 +217,63 @@ def test_an_unknown_tool_is_rejected(credentials):
     client = GmailClient(credentials, make_client(lambda r: httpx.Response(200, json={})))
     with pytest.raises(ValueError, match="Unknown tool"):
         _dispatch(client, "you@example.com", None, "send_message", {})
+
+
+# -- drafts ------------------------------------------------------------------
+
+
+def test_list_drafts_reports_the_count(credentials):
+    def handler(request):
+        if "oauth2.googleapis.com" in str(request.url):
+            return httpx.Response(200, json={"access_token": "tok", "expires_in": 3600})
+        return httpx.Response(200, json={"drafts": [{"id": "d1"}, {"id": "d2"}]})
+
+    client = GmailClient(credentials, make_client(handler))
+    result = json.loads(_dispatch(client, "you@example.com", None, "list_drafts", {}))
+
+    assert result["count"] == 2
+    assert [d["id"] for d in result["drafts"]] == ["d1", "d2"]
+
+
+def test_create_draft_sends_a_base64url_encoded_message(credentials):
+    seen = {}
+
+    def handler(request):
+        url = str(request.url)
+        if "oauth2.googleapis.com" in url:
+            return httpx.Response(200, json={"access_token": "tok", "expires_in": 3600})
+        if request.method == "POST" and "/drafts" in url:
+            seen["body"] = json.loads(request.content)
+            return httpx.Response(200, json={"id": "d1"})
+        return httpx.Response(404, json={"error": {"message": "unexpected"}})
+
+    client = GmailClient(credentials, make_client(handler))
+    result = json.loads(
+        _dispatch(
+            client,
+            "you@example.com",
+            None,
+            "create_draft",
+            {"to": "a@example.com", "subject": "Hi", "body": "Hello there"},
+        )
+    )
+
+    assert result["draft_id"] == "d1"
+    raw = decode_base64url(seen["body"]["message"]["raw"])
+    assert "To: a@example.com" in raw
+    assert "Subject: Hi" in raw
+    assert "Hello there" in raw
+
+
+def test_delete_draft_reports_what_was_deleted(credentials):
+    def handler(request):
+        if "oauth2.googleapis.com" in str(request.url):
+            return httpx.Response(200, json={"access_token": "tok", "expires_in": 3600})
+        return httpx.Response(204)
+
+    client = GmailClient(credentials, make_client(handler))
+    result = json.loads(
+        _dispatch(client, "you@example.com", None, "delete_draft", {"draft_id": "d1"})
+    )
+
+    assert result["deleted"] == "d1"

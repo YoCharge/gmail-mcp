@@ -99,9 +99,15 @@ Pick the user type:
 > everything is broken". If you must use External, publish the app to move out of
 > Testing, or accept re-authorizing weekly.
 
-Add the scope `https://www.googleapis.com/auth/gmail.readonly`. That is the only
-scope this server uses — it cannot send, reply, draft, label or delete, and requesting
-nothing further is what makes that structural rather than a promise.
+Add both scopes:
+
+- `https://www.googleapis.com/auth/gmail.readonly`
+- `https://www.googleapis.com/auth/gmail.compose`
+
+Those are the only scopes this server uses. `gmail.compose` is what lets it create,
+update and delete drafts — but no tool here calls the send endpoint, so there is no
+code path that puts a message in anyone's inbox. It still cannot reply, forward,
+label or delete existing mail.
 
 ## 4. Create the OAuth client and get the client ID and secret
 
@@ -223,7 +229,7 @@ gmail-mcp
 A working setup prints one line to stderr and then waits for MCP traffic on stdin:
 
 ```
-gmail-mcp: serving you@example.com (read-only)
+gmail-mcp: serving you@example.com (read + drafts, never sends)
 ```
 
 That line means the refresh token was exchanged **and** the mailbox identity was
@@ -269,3 +275,8 @@ new Desktop client.
 
 **`403 accessNotConfigured`**
 Same as the first entry: the Gmail API is not enabled on the project.
+
+**Draft tools fail with `insufficient authentication scopes` even though search/read tools work**
+The refresh token was issued before `gmail.compose` was added to the consent screen
+and this flow. Re-run `gmail-mcp-auth you@example.com` to get a new refresh token that
+covers both scopes, and update that mailbox's `GMAIL_REFRESH_TOKEN`.
