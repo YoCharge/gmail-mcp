@@ -214,7 +214,13 @@ Repeat per mailbox. Each run produces its own refresh token.
 ## 6. Register the servers
 
 One entry per mailbox, each with its own `GMAIL_ACCOUNT` and `GMAIL_REFRESH_TOKEN`,
-sharing the same client ID and secret. See the README for a full example.
+sharing the same client ID and secret. Also set `GMAIL_CAPABILITIES` per mailbox —
+there is no default, and it decides which tools this process even registers (see the
+README's [Capabilities](../README.md#capabilities) section). A mailbox that should
+only ever be read from, or only drafted into by a human-sends-later workflow, should
+not be given `send`.
+
+See the README for a full example.
 
 Keep that config file out of version control. A refresh token opens the mailbox until
 it is revoked.
@@ -226,6 +232,7 @@ Before wiring it into a client, check the credentials directly:
 ```bash
 export GMAIL_ACCOUNT=you@example.com
 export GMAIL_REFRESH_TOKEN='1//0g...'      # from step 5
+export GMAIL_CAPABILITIES=read,draft,send
 # GMAIL_CLIENT_ID and GMAIL_CLIENT_SECRET already exported from step 4
 
 gmail-mcp
@@ -234,7 +241,7 @@ gmail-mcp
 A working setup prints one line to stderr and then waits for MCP traffic on stdin:
 
 ```
-gmail-mcp: serving you@example.com (read, drafts, send-with-confirmation, label/trash)
+gmail-mcp: serving you@example.com (capabilities: draft,read,send)
 ```
 
 That line means the refresh token was exchanged **and** the mailbox identity was
@@ -265,6 +272,11 @@ Step 2. Enable the Gmail API, wait a minute for it to propagate, run again.
 The refresh token is dead — revoked, the account's password changed, or it is an
 External app still in Testing and seven days have passed (step 3). Re-run
 `gmail-mcp-auth`.
+
+**`GMAIL_CAPABILITIES is not set`** or **`is not a recognised capability set`**
+Set it to one of `read`, `read,draft`, or `read,draft,send` (step 6). There is no
+default, and partial tiers like `send` alone or `read,send` are rejected — each tier
+implies the ones before it.
 
 **`Refresh token mismatch: GMAIL_ACCOUNT is 'a@example.com' but this token opens 'b@example.com'`**
 A token is in the wrong server entry. This is the startup check doing its job. Swap

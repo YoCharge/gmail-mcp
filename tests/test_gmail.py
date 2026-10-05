@@ -183,7 +183,7 @@ ORIGINAL = {
     "threadId": "t1",
     "payload": {
         "headers": [
-            {"name": "Message-ID", "value": "<abc@mail.gmail.com>"},
+            {"name": "Message-ID", "value": "<abc@example.com>"},
             {"name": "Subject", "value": "Hello"},
             {"name": "From", "value": "Alice <alice@example.com>"},
             {"name": "To", "value": "you@example.com, bob@example.com"},
@@ -213,8 +213,8 @@ def test_build_reply_mime_message_threads_on_the_original():
     decoded = decode_base64url(raw)
 
     assert "Subject: Re: Hello" in decoded
-    assert "In-Reply-To: <abc@mail.gmail.com>" in decoded
-    assert "References: <abc@mail.gmail.com>" in decoded
+    assert "In-Reply-To: <abc@example.com>" in decoded
+    assert "References: <abc@example.com>" in decoded
     assert "Thanks!" in decoded
 
 

@@ -88,6 +88,7 @@ Add one entry per mailbox:
         "GMAIL_CLIENT_ID": "...apps.googleusercontent.com",
         "GMAIL_CLIENT_SECRET": "...",
         "GMAIL_REFRESH_TOKEN": "1//0g...",
+        "GMAIL_CAPABILITIES": "read,draft,send",
         "GMAIL_MCP_DOWNLOAD_DIR": "/absolute/path/for/attachments"
       }
     },
@@ -99,7 +100,8 @@ Add one entry per mailbox:
         "GMAIL_ACCOUNT": "team@example.com",
         "GMAIL_CLIENT_ID": "...apps.googleusercontent.com",
         "GMAIL_CLIENT_SECRET": "...",
-        "GMAIL_REFRESH_TOKEN": "1//0g..."
+        "GMAIL_REFRESH_TOKEN": "1//0g...",
+        "GMAIL_CAPABILITIES": "read"
       }
     }
   }
@@ -196,7 +198,29 @@ accordingly.
 | `GMAIL_CLIENT_ID` | yes | OAuth client id |
 | `GMAIL_CLIENT_SECRET` | yes | OAuth client secret |
 | `GMAIL_REFRESH_TOKEN` | yes | From `gmail-mcp-auth`, for this mailbox |
+| `GMAIL_CAPABILITIES` | yes | `read`, `read,draft`, or `read,draft,send` — see [Capabilities](#capabilities). No default |
 | `GMAIL_MCP_DOWNLOAD_DIR` | no | Fallback directory for `download_attachment` |
+
+## Capabilities
+
+`GMAIL_CAPABILITIES` controls which tools this process even *registers* — not just
+which it can use. A mailbox configured with `read` never advertises `send_draft`,
+`trash_thread`, or any other write tool to the client; they are simply absent from
+the tool list, the same way a server with no credential for a mailbox cannot read it.
+
+The three tiers are cumulative, since each depends on the one before it:
+
+| Tier | Unlocks |
+|---|---|
+| `read` | Search, read threads/messages/drafts, list labels, download attachments |
+| `read,draft` | + create/update/delete drafts (including replies and forwards), label, trash, untrash, and mark/unmark spam |
+| `read,draft,send` | + `send_draft` — the one tool that can put a message in someone's inbox |
+
+There is no default: an unset or invalid value refuses to start, the same as a
+missing `GMAIL_ACCOUNT`. A mailbox that only ever needs to be read from — a shared
+support inbox a bot drafts into but a human sends from, say — should be configured
+with `GMAIL_CAPABILITIES=read,draft` so `send_draft` is never on its tool list at all,
+rather than relying on a model to not call it.
 
 ## Licence
 

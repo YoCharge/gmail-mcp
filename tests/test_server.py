@@ -5,12 +5,14 @@ import pytest
 
 from gmail_mcp.gmail import GmailClient, decode_base64url
 from gmail_mcp.server import (
+    TOOL_CAPABILITY,
     TOOL_NAMES,
     ConfigError,
     _dispatch,
     assert_account,
     build_server,
     load_config,
+    parse_capabilities,
     resolve_dest_dir,
     safe_filename,
     tool_descriptions,
@@ -22,6 +24,7 @@ FULL_ENV = {
     "GMAIL_CLIENT_ID": "client-id",
     "GMAIL_CLIENT_SECRET": "client-secret",
     "GMAIL_REFRESH_TOKEN": "refresh-token",
+    "GMAIL_CAPABILITIES": "read,draft,send",
 }
 
 
@@ -41,10 +44,28 @@ def test_refuses_to_start_without_credentials():
 
 
 def test_download_dir_is_optional():
-    account, credentials, download_dir = load_config(FULL_ENV)
+    account, credentials, download_dir, capabilities = load_config(FULL_ENV)
     assert account == "you@example.com"
     assert credentials.refresh_token == "refresh-token"
     assert download_dir is None
+    assert capabilities == {"read", "draft", "send"}
+
+
+def test_refuses_to_start_without_capabilities():
+    env = {k: v for k, v in FULL_ENV.items() if k != "GMAIL_CAPABILITIES"}
+    with pytest.raises(ConfigError, match="GMAIL_CAPABILITIES"):
+        load_config(env)
+
+
+def test_capabilities_reject_a_tier_granted_without_its_prerequisites():
+    """send without draft, or draft without read, describes an impossible mailbox."""
+    for bogus in ("send", "draft", "read,send"):
+        with pytest.raises(ConfigError, match="not a recognised capability set"):
+            parse_capabilities(bogus)
+
+
+def test_capabilities_are_case_and_order_insensitive():
+    assert parse_capabilities("Draft, READ") == {"read", "draft"}
 
 
 # -- the startup identity assertion ---------------------------------------
@@ -152,13 +173,44 @@ def test_there_is_no_permanent_delete():
 async def test_the_server_registers_exactly_those_tools(credentials):
     """Guards the wiring itself: a tool defined but never registered is invisible."""
     client = GmailClient(credentials, make_client(lambda r: httpx.Response(200, json={})))
-    server = build_server(client, "you@example.com", None)
+    server = build_server(client, "you@example.com", None, frozenset({"read", "draft", "send"}))
 
     registered = await server.list_tools()
 
     assert {tool.name for tool in registered} == set(TOOL_NAMES)
     for tool in registered:
         assert "you@example.com" in tool.description
+
+
+# -- capability gating -------------------------------------------------------
+
+
+async def test_a_read_only_mailbox_registers_no_write_tools(credentials):
+    """The whole point: a mailbox scoped to 'read' must never advertise a write tool."""
+    client = GmailClient(credentials, make_client(lambda r: httpx.Response(200, json={})))
+    server = build_server(client, "you@example.com", None, frozenset({"read"}))
+
+    registered = {tool.name for tool in await server.list_tools()}
+
+    assert registered == {name for name, tier in TOOL_CAPABILITY.items() if tier == "read"}
+    assert "send_draft" not in registered
+    assert "trash_thread" not in registered
+    assert "mark_thread_spam" not in registered
+
+
+async def test_a_draft_only_mailbox_can_compose_but_not_send(credentials):
+    client = GmailClient(credentials, make_client(lambda r: httpx.Response(200, json={})))
+    server = build_server(client, "you@example.com", None, frozenset({"read", "draft"}))
+
+    registered = {tool.name for tool in await server.list_tools()}
+
+    assert "create_draft" in registered
+    assert "trash_thread" in registered
+    assert "send_draft" not in registered
+
+
+def test_every_tool_has_an_assigned_capability_tier():
+    assert set(TOOL_CAPABILITY) == set(TOOL_NAMES)
 
 
 # -- attachment handling ---------------------------------------------------
@@ -360,7 +412,7 @@ ORIGINAL_MESSAGE = {
     "threadId": "t1",
     "payload": {
         "headers": [
-            {"name": "Message-ID", "value": "<abc@mail.gmail.com>"},
+            {"name": "Message-ID", "value": "<abc@example.com>"},
             {"name": "Subject", "value": "Hello"},
             {"name": "From", "value": "Alice <alice@example.com>"},
             {"name": "To", "value": "you@example.com, bob@example.com"},
@@ -400,7 +452,7 @@ def test_create_reply_draft_threads_and_fills_recipients_for_reply_all(credentia
     assert result["subject"] == "Re: Hello"
     assert seen["body"]["message"]["threadId"] == "t1"
     raw = decode_base64url(seen["body"]["message"]["raw"])
-    assert "In-Reply-To: <abc@mail.gmail.com>" in raw
+    assert "In-Reply-To: <abc@example.com>" in raw
     assert "Thanks!" in raw
 
 

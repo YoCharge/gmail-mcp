@@ -9,6 +9,7 @@
         "GMAIL_CLIENT_ID": "123456789012-abc123def456.apps.googleusercontent.com",
         "GMAIL_CLIENT_SECRET": "REPLACE_WITH_CLIENT_SECRET_FROM_STEP_4",
         "GMAIL_REFRESH_TOKEN": "REPLACE_WITH_REFRESH_TOKEN_PRINTED_BY_gmail-mcp-auth",
+        "GMAIL_CAPABILITIES": "read,draft,send",
         "GMAIL_MCP_DOWNLOAD_DIR": "/absolute/path/for/attachments"
       }
     },
@@ -20,7 +21,8 @@
         "GMAIL_ACCOUNT": "team@example.com",
         "GMAIL_CLIENT_ID": "123456789012-abc123def456.apps.googleusercontent.com",
         "GMAIL_CLIENT_SECRET": "REPLACE_WITH_CLIENT_SECRET_FROM_STEP_4",
-        "GMAIL_REFRESH_TOKEN": "REPLACE_WITH_A_DIFFERENT_REFRESH_TOKEN_FOR_team@example.com"
+        "GMAIL_REFRESH_TOKEN": "REPLACE_WITH_A_DIFFERENT_REFRESH_TOKEN_FOR_team@example.com",
+        "GMAIL_CAPABILITIES": "read"
       }
     }
   }

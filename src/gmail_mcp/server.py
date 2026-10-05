@@ -46,7 +46,36 @@ class ConfigError(RuntimeError):
     """The environment does not describe a usable mailbox."""
 
 
-def load_config(env: dict[str, str] | None = None) -> tuple[str, Credentials, str | None]:
+
+CAPABILITY_TIERS: tuple[tuple[str, ...], ...] = (
+    ("read",),
+    ("read", "draft"),
+    ("read", "draft", "send"),
+)
+
+
+def parse_capabilities(raw: str) -> frozenset[str]:
+    """Validate GMAIL_CAPABILITIES against the known cumulative tiers.
+
+    Rejects anything that is not exactly one of the tiers a mailbox can hold —
+    in particular a tier granted without the ones beneath it (e.g. "send" alone),
+    which would describe a mailbox that can send without being able to draft.
+    """
+    given = frozenset(part.strip().lower() for part in raw.split(",") if part.strip())
+    for tier in CAPABILITY_TIERS:
+        if given == frozenset(tier):
+            return given
+
+    valid = " / ".join(",".join(tier) for tier in CAPABILITY_TIERS)
+    raise ConfigError(
+        f"GMAIL_CAPABILITIES={raw!r} is not a recognised capability set. "
+        f"Use one of: {valid}."
+    )
+
+
+def load_config(
+    env: dict[str, str] | None = None,
+) -> tuple[str, Credentials, str | None, frozenset[str]]:
     """Read and validate the environment. Raises ConfigError rather than guessing."""
     env = os.environ if env is None else env
 
@@ -75,7 +104,17 @@ def load_config(env: dict[str, str] | None = None) -> tuple[str, Credentials, st
     )
 
     download_dir = (env.get("GMAIL_MCP_DOWNLOAD_DIR") or "").strip() or None
-    return account, credentials, download_dir
+
+    capabilities_raw = (env.get("GMAIL_CAPABILITIES") or "").strip()
+    if not capabilities_raw:
+        valid = " / ".join(",".join(tier) for tier in CAPABILITY_TIERS)
+        raise ConfigError(
+            "GMAIL_CAPABILITIES is not set. This server has no default — a mailbox "
+            f"must declare what it is allowed to do. Set it to one of: {valid}."
+        )
+    capabilities = parse_capabilities(capabilities_raw)
+
+    return account, credentials, download_dir, capabilities
 
 
 def assert_account(client: GmailClient, expected: str) -> str:
@@ -130,6 +169,41 @@ TOOL_NAMES = (
     "update_label",
     "delete_label",
 )
+
+# tools capabilities for apply limitation over the user can use tools
+TOOL_CAPABILITY: dict[str, str] = {
+    "search_threads": "read",
+    "get_thread": "read",
+    "get_message": "read",
+    "list_labels": "read",
+    "download_attachment": "read",
+    "list_drafts": "read",
+    "get_draft": "read",
+    "create_draft": "draft",
+    "update_draft": "draft",
+    "delete_draft": "draft",
+    "send_draft": "send",
+    "create_reply_draft": "draft",
+    "create_forward_draft": "draft",
+    "label_thread": "draft",
+    "unlabel_thread": "draft",
+    "trash_thread": "draft",
+    "untrash_thread": "draft",
+    "apply_sensitive_thread_label": "draft",
+    "mark_thread_spam": "draft",
+    "unmark_thread_spam": "draft",
+    "label_message": "draft",
+    "unlabel_message": "draft",
+    "update_message_labels": "draft",
+    "apply_sensitive_message_label": "draft",
+    "trash_message": "draft",
+    "untrash_message": "draft",
+    "mark_message_spam": "draft",
+    "unmark_message_spam": "draft",
+    "create_label": "draft",
+    "update_label": "draft",
+    "delete_label": "draft",
+}
 
 
 def tool_descriptions(account: str) -> dict[str, str]:
@@ -646,7 +720,12 @@ def _dispatch(client: GmailClient, account: str, download_dir: str | None,
     raise ValueError(f"Unknown tool: {name}")
 
 
-def build_server(client: GmailClient, account: str, download_dir: str | None) -> MCPServer:
+def build_server(
+    client: GmailClient,
+    account: str,
+    download_dir: str | None,
+    capabilities: frozenset[str],
+) -> MCPServer:
     server = MCPServer(name="gmail-mcp", version=__version__)
     notice = UNTRUSTED_NOTICE.format(account=account)
     descriptions = tool_descriptions(account)
@@ -898,6 +977,8 @@ def build_server(client: GmailClient, account: str, download_dir: str | None) ->
         update_label,
         delete_label,
     ):
+        if TOOL_CAPABILITY[function.__name__] not in capabilities:
+            continue
         server.add_tool(
             function,
             name=function.__name__,
@@ -908,18 +989,18 @@ def build_server(client: GmailClient, account: str, download_dir: str | None) ->
 
 
 async def _serve() -> None:
-    account, credentials, download_dir = load_config()
+    account, credentials, download_dir, capabilities = load_config()
 
     http = httpx.Client(timeout=30.0)
     client = GmailClient(credentials, client=http)
 
     resolved = assert_account(client, account)
     print(
-        f"gmail-mcp: serving {resolved} (read, drafts, send-with-confirmation, label/trash)",
+        f"gmail-mcp: serving {resolved} (capabilities: {','.join(sorted(capabilities))})",
         file=sys.stderr,
     )
 
-    server = build_server(client, account, download_dir)
+    server = build_server(client, account, download_dir, capabilities)
     await server.run_stdio_async()
 
 
