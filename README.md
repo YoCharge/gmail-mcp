@@ -133,12 +133,12 @@ Thirty-one, each named with its mailbox in the description.
 | `download_attachment(message_id, attachment_id, dest_dir?, filename?)` | Writes one attachment to disk |
 | `list_drafts(max_results=20)` | Draft ids and snippets |
 | `get_draft(draft_id)` | One draft's composed message |
-| `create_draft(to, subject?, body?, cc?, bcc?, thread_id?)` | Writes a new draft. Never sent automatically |
-| `update_draft(draft_id, to, subject?, body?, cc?, bcc?, thread_id?)` | Replaces an existing draft's contents |
+| `create_draft(to, subject?, body?, cc?, bcc?, thread_id?, attachment_paths?)` | Writes a new draft. Never sent automatically |
+| `update_draft(draft_id, to, subject?, body?, cc?, bcc?, thread_id?, attachment_paths?)` | Replaces an existing draft's contents |
 | `delete_draft(draft_id)` | Deletes a draft. Cannot be undone |
 | `send_draft(draft_id)` | Sends an existing draft. **Irreversible** — see [Sending](#sending) |
-| `create_reply_draft(message_id, body?, reply_all?, to?, cc?, bcc?)` | Drafts a threaded reply to a message |
-| `create_forward_draft(message_id, to, body?, cc?, bcc?)` | Drafts a forward quoting the original. No attachments carried over |
+| `create_reply_draft(message_id, body?, reply_all?, to?, cc?, bcc?, attachment_paths?)` | Drafts a threaded reply to a message |
+| `create_forward_draft(message_id, to, body?, cc?, bcc?, attachment_paths?)` | Drafts a forward quoting the original. Original's attachments aren't carried over automatically — download them first and pass the local paths via `attachment_paths` |
 | `label_thread(thread_id, label_ids)` | Adds one or more labels to a thread |
 | `unlabel_thread(thread_id, label_ids)` | Removes one or more labels from a thread |
 | `trash_thread(thread_id)` | Moves a thread to Trash. Reversible — recover with `untrash_thread` |
@@ -162,6 +162,13 @@ Thirty-one, each named with its mailbox in the description.
 `GMAIL_MCP_DOWNLOAD_DIR` in the environment. It will not guess a directory. Filenames
 supplied by the sender are reduced to their final path component, so an attachment
 named `../../.ssh/authorized_keys` writes as `authorized_keys`.
+
+`attachment_paths` (on `create_draft`, `update_draft`, `create_reply_draft` and
+`create_forward_draft`) takes a list of local file paths on the machine running the
+server. Each file is read from disk and attached under its own filename; combined
+attachments must stay under 25MB, since that's Gmail's limit for a draft created
+through this non-resumable endpoint. `update_draft` replaces a draft's attachments
+entirely — omit `attachment_paths` to drop whatever was there before.
 
 ## Sending
 

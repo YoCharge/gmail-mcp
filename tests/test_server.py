@@ -350,6 +350,42 @@ def test_create_draft_sends_a_base64url_encoded_message(credentials):
     assert "Hello there" in raw
 
 
+def test_create_draft_attaches_a_local_file(credentials, tmp_path):
+    seen = {}
+    file_path = tmp_path / "doc.pdf"
+    file_path.write_bytes(b"%PDF-1.4 fake contents")
+
+    def handler(request):
+        url = str(request.url)
+        if "oauth2.googleapis.com" in url:
+            return httpx.Response(200, json={"access_token": "tok", "expires_in": 3600})
+        if request.method == "POST" and "/drafts" in url:
+            seen["body"] = json.loads(request.content)
+            return httpx.Response(200, json={"id": "d1"})
+        return httpx.Response(404, json={"error": {"message": "unexpected"}})
+
+    client = GmailClient(credentials, make_client(handler))
+    result = json.loads(
+        _dispatch(
+            client,
+            "you@example.com",
+            None,
+            "create_draft",
+            {
+                "to": "a@example.com",
+                "subject": "Hi",
+                "body": "See attached",
+                "attachment_paths": [str(file_path)],
+            },
+        )
+    )
+
+    assert result["attachments"] == ["doc.pdf"]
+    raw = decode_base64url(seen["body"]["message"]["raw"])
+    assert "Content-Disposition: attachment" in raw
+    assert 'filename="doc.pdf"' in raw
+
+
 def test_delete_draft_reports_what_was_deleted(credentials):
     def handler(request):
         if "oauth2.googleapis.com" in str(request.url):

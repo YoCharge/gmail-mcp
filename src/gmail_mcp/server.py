@@ -237,14 +237,17 @@ def tool_descriptions(account: str) -> dict[str, str]:
         "create_draft": (
             f"Create a new draft in {account} with the given to/subject/body (and "
             f"optional cc/bcc). Pass thread_id to draft a reply inside an existing "
-            f"thread. This only writes to the Drafts folder — it does not send anything "
+            f"thread. Pass attachment_paths — a list of local file paths on this "
+            f"machine — to attach files; combined attachments must stay under 25MB. "
+            f"This only writes to the Drafts folder — it does not send anything "
             f"by itself. To actually send it, show the user the exact to/subject/body "
             f"from this call's result, get their explicit go-ahead, and only then call "
             f"send_draft with the returned draft_id."
         ),
         "update_draft": (
-            f"Replace the to/subject/body/cc/bcc of an existing draft in {account}. "
-            f"Still does not send anything."
+            f"Replace the to/subject/body/cc/bcc/attachment_paths of an existing draft "
+            f"in {account}. attachment_paths replaces the draft's attachments entirely "
+            f"— omit it to drop any existing attachments. Still does not send anything."
         ),
         "delete_draft": f"Delete a draft in {account} by id. This cannot be undone.",
         "send_draft": (
@@ -259,16 +262,20 @@ def tool_descriptions(account: str) -> dict[str, str]:
             f"for threading (In-Reply-To/References, same thread) and prefixes the "
             f"subject with 'Re:' if needed. Defaults to replying only to the original "
             f"sender; pass reply_all=true to also cc everyone else who was on the "
-            f"original's To/Cc. Pass to/cc/bcc to override either. Like create_draft, "
-            f"this only writes to the Drafts folder — send it via send_draft after "
-            f"the user confirms the echoed content."
+            f"original's To/Cc. Pass to/cc/bcc to override either. Pass attachment_paths "
+            f"— a list of local file paths — to attach files; combined attachments "
+            f"must stay under 25MB. Like create_draft, this only writes to the Drafts "
+            f"folder — send it via send_draft after the user confirms the echoed "
+            f"content."
         ),
         "create_forward_draft": (
             f"Create a draft forwarding a message in {account} to new recipients, with "
             f"the original's From/Date/Subject/To and body quoted underneath. Subject "
-            f"is prefixed with 'Fwd:' if needed. Does NOT carry over the original's "
-            f"attachments. Only writes to the Drafts folder — send via send_draft "
-            f"after confirmation, same as every other draft here."
+            f"is prefixed with 'Fwd:' if needed. Does NOT automatically carry over the "
+            f"original's attachments — download them first with download_attachment, "
+            f"then pass their local paths via attachment_paths to re-attach them (or "
+            f"attach anything else). Only writes to the Drafts folder — send via "
+            f"send_draft after confirmation, same as every other draft here."
         ),
         "label_thread": (
             f"Add one or more labels to a thread in {account}. label_ids are Gmail "
@@ -458,12 +465,14 @@ def _dispatch(client: GmailClient, account: str, download_dir: str | None,
         )
 
     if name == "create_draft":
+        attachment_paths = arguments.get("attachment_paths") or None
         raw = build_mime_message(
             to=arguments["to"],
             subject=arguments.get("subject", ""),
             body=arguments.get("body", ""),
             cc=arguments.get("cc"),
             bcc=arguments.get("bcc"),
+            attachment_paths=attachment_paths,
         )
         draft = client.create_draft(raw, thread_id=arguments.get("thread_id"))
         return json.dumps(
@@ -477,17 +486,20 @@ def _dispatch(client: GmailClient, account: str, download_dir: str | None,
                 "body": arguments.get("body", ""),
                 "cc": arguments.get("cc"),
                 "bcc": arguments.get("bcc"),
+                "attachments": [Path(p).name for p in attachment_paths or []],
             },
             indent=2,
         )
 
     if name == "update_draft":
+        attachment_paths = arguments.get("attachment_paths") or None
         raw = build_mime_message(
             to=arguments["to"],
             subject=arguments.get("subject", ""),
             body=arguments.get("body", ""),
             cc=arguments.get("cc"),
             bcc=arguments.get("bcc"),
+            attachment_paths=attachment_paths,
         )
         draft = client.update_draft(
             arguments["draft_id"], raw, thread_id=arguments.get("thread_id")
@@ -501,6 +513,7 @@ def _dispatch(client: GmailClient, account: str, download_dir: str | None,
                 "body": arguments.get("body", ""),
                 "cc": arguments.get("cc"),
                 "bcc": arguments.get("bcc"),
+                "attachments": [Path(p).name for p in attachment_paths or []],
             },
             indent=2,
         )
@@ -526,8 +539,14 @@ def _dispatch(client: GmailClient, account: str, download_dir: str | None,
         cc = arguments.get("cc")
         if cc is None and arguments.get("reply_all"):
             cc = other_recipients(original, account) or None
+        attachment_paths = arguments.get("attachment_paths") or None
         raw = build_reply_mime_message(
-            original, arguments.get("body", ""), to=to, cc=cc, bcc=arguments.get("bcc")
+            original,
+            arguments.get("body", ""),
+            to=to,
+            cc=cc,
+            bcc=arguments.get("bcc"),
+            attachment_paths=attachment_paths,
         )
         draft = client.create_draft(raw, thread_id=original.get("threadId"))
         return json.dumps(
@@ -540,18 +559,21 @@ def _dispatch(client: GmailClient, account: str, download_dir: str | None,
                 "body": arguments.get("body", ""),
                 "cc": cc,
                 "bcc": arguments.get("bcc"),
+                "attachments": [Path(p).name for p in attachment_paths or []],
             },
             indent=2,
         )
 
     if name == "create_forward_draft":
         original = client.get_message(arguments["message_id"])
+        attachment_paths = arguments.get("attachment_paths") or None
         raw = build_forward_mime_message(
             original,
             arguments.get("body", ""),
             to=arguments["to"],
             cc=arguments.get("cc"),
             bcc=arguments.get("bcc"),
+            attachment_paths=attachment_paths,
         )
         draft = client.create_draft(raw)
         return json.dumps(
@@ -564,6 +586,7 @@ def _dispatch(client: GmailClient, account: str, download_dir: str | None,
                 "body": arguments.get("body", ""),
                 "cc": arguments.get("cc"),
                 "bcc": arguments.get("bcc"),
+                "attachments": [Path(p).name for p in attachment_paths or []],
             },
             indent=2,
         )
@@ -784,10 +807,19 @@ def build_server(
         cc: str | None = None,
         bcc: str | None = None,
         thread_id: str | None = None,
+        attachment_paths: list[str] | None = None,
     ) -> str:
         return await run_tool(
             "create_draft",
-            {"to": to, "subject": subject, "body": body, "cc": cc, "bcc": bcc, "thread_id": thread_id},
+            {
+                "to": to,
+                "subject": subject,
+                "body": body,
+                "cc": cc,
+                "bcc": bcc,
+                "thread_id": thread_id,
+                "attachment_paths": attachment_paths,
+            },
         )
 
     async def update_draft(
@@ -798,6 +830,7 @@ def build_server(
         cc: str | None = None,
         bcc: str | None = None,
         thread_id: str | None = None,
+        attachment_paths: list[str] | None = None,
     ) -> str:
         return await run_tool(
             "update_draft",
@@ -809,6 +842,7 @@ def build_server(
                 "cc": cc,
                 "bcc": bcc,
                 "thread_id": thread_id,
+                "attachment_paths": attachment_paths,
             },
         )
 
@@ -825,6 +859,7 @@ def build_server(
         to: str | None = None,
         cc: str | None = None,
         bcc: str | None = None,
+        attachment_paths: list[str] | None = None,
     ) -> str:
         return await run_tool(
             "create_reply_draft",
@@ -835,6 +870,7 @@ def build_server(
                 "to": to,
                 "cc": cc,
                 "bcc": bcc,
+                "attachment_paths": attachment_paths,
             },
         )
 
@@ -844,10 +880,18 @@ def build_server(
         body: str = "",
         cc: str | None = None,
         bcc: str | None = None,
+        attachment_paths: list[str] | None = None,
     ) -> str:
         return await run_tool(
             "create_forward_draft",
-            {"message_id": message_id, "to": to, "body": body, "cc": cc, "bcc": bcc},
+            {
+                "message_id": message_id,
+                "to": to,
+                "body": body,
+                "cc": cc,
+                "bcc": bcc,
+                "attachment_paths": attachment_paths,
+            },
         )
 
     async def label_thread(thread_id: str, label_ids: list[str]) -> str:

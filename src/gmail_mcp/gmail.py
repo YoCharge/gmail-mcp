@@ -15,7 +15,9 @@ that label, and recreating a same-named label does not relink them.
 from __future__ import annotations
 
 import base64
+import mimetypes
 from email.message import EmailMessage
+from pathlib import Path
 from typing import Any, Iterator
 
 import httpx
@@ -23,6 +25,10 @@ import httpx
 API_ROOT = "https://gmail.googleapis.com/gmail/v1/users/me"
 
 DEFAULT_TIMEOUT = 30.0
+
+# Gmail's drafts.create/update reject a message over 25MB; anything larger needs the
+# resumable upload endpoint, which this client does not implement.
+MAX_ATTACHMENTS_BYTES = 25 * 1024 * 1024
 
 
 class GmailError(RuntimeError):
@@ -277,12 +283,41 @@ def _describe_failure(response: httpx.Response) -> str:
 # any network involved.
 
 
+def attach_files(message: EmailMessage, attachment_paths: list[str] | None) -> None:
+    """Read local files from disk and attach them to `message` in place.
+
+    Filenames are taken from each path's final component. `add_attachment` after
+    `set_content` turns the message into multipart/mixed automatically.
+    """
+    if not attachment_paths:
+        return
+
+    total_bytes = 0
+    for raw_path in attachment_paths:
+        path = Path(raw_path).expanduser()
+        if not path.is_file():
+            raise ValueError(f"Attachment not found: {path}")
+
+        data = path.read_bytes()
+        total_bytes += len(data)
+        if total_bytes > MAX_ATTACHMENTS_BYTES:
+            raise ValueError(
+                f"Attachments exceed Gmail's {MAX_ATTACHMENTS_BYTES // (1024 * 1024)}MB "
+                f"limit for a single message."
+            )
+
+        mime_type, _ = mimetypes.guess_type(path.name)
+        maintype, _, subtype = (mime_type or "application/octet-stream").partition("/")
+        message.add_attachment(data, maintype=maintype, subtype=subtype, filename=path.name)
+
+
 def build_mime_message(
     to: str,
     subject: str = "",
     body: str = "",
     cc: str | None = None,
     bcc: str | None = None,
+    attachment_paths: list[str] | None = None,
 ) -> str:
     """Build an RFC 822 message and base64url-encode it the way drafts.create expects.
 
@@ -297,6 +332,7 @@ def build_mime_message(
         message["Bcc"] = bcc
     message["Subject"] = subject
     message.set_content(body)
+    attach_files(message, attachment_paths)
     return base64.urlsafe_b64encode(message.as_bytes()).decode().rstrip("=")
 
 
@@ -318,6 +354,7 @@ def build_reply_mime_message(
     to: str,
     cc: str | None = None,
     bcc: str | None = None,
+    attachment_paths: list[str] | None = None,
 ) -> str:
     """Build a reply threaded to `original` via In-Reply-To/References.
 
@@ -340,6 +377,7 @@ def build_reply_mime_message(
     if references:
         message["References"] = references
     message.set_content(body)
+    attach_files(message, attachment_paths)
     return base64.urlsafe_b64encode(message.as_bytes()).decode().rstrip("=")
 
 
@@ -349,11 +387,13 @@ def build_forward_mime_message(
     to: str,
     cc: str | None = None,
     bcc: str | None = None,
+    attachment_paths: list[str] | None = None,
 ) -> str:
     """Build a forward: a new message quoting `original`'s headers and body.
 
-    Attachments on the original are not carried over — forwarding one would require
-    downloading and re-attaching its bytes, which no tool here does yet.
+    Attachments on the original are not carried over automatically — forwarding one
+    would require downloading it first (download_attachment) and passing its local
+    path back in via attachment_paths.
     """
     quoted = (
         "---------- Forwarded message ----------\n"
@@ -373,6 +413,7 @@ def build_forward_mime_message(
         message["Bcc"] = bcc
     message["Subject"] = forward_subject(header(original, "Subject"))
     message.set_content(full_body)
+    attach_files(message, attachment_paths)
     return base64.urlsafe_b64encode(message.as_bytes()).decode().rstrip("=")
 
 

@@ -176,6 +176,35 @@ def test_build_mime_message_includes_the_given_fields():
     assert "From:" not in decoded
 
 
+def test_build_mime_message_attaches_a_local_file(tmp_path):
+    file_path = tmp_path / "notes.txt"
+    file_path.write_text("hello world")
+
+    raw = build_mime_message(to="a@example.com", body="hi", attachment_paths=[str(file_path)])
+    decoded = decode_base64url(raw)
+
+    assert "Content-Disposition: attachment" in decoded
+    assert 'filename="notes.txt"' in decoded
+    assert "aGVsbG8gd29ybGQ=" in decoded  # base64 of "hello world"
+
+
+def test_build_mime_message_rejects_a_missing_attachment(tmp_path):
+    missing = tmp_path / "missing.txt"
+    with pytest.raises(ValueError, match="not found"):
+        build_mime_message(to="a@example.com", attachment_paths=[str(missing)])
+
+
+def test_build_mime_message_rejects_attachments_over_the_size_limit(tmp_path, monkeypatch):
+    import gmail_mcp.gmail as gmail_module
+
+    monkeypatch.setattr(gmail_module, "MAX_ATTACHMENTS_BYTES", 10)
+    big = tmp_path / "big.bin"
+    big.write_bytes(b"x" * 20)
+
+    with pytest.raises(ValueError, match="limit"):
+        build_mime_message(to="a@example.com", attachment_paths=[str(big)])
+
+
 # -- reply / forward composition --------------------------------------------
 
 ORIGINAL = {
