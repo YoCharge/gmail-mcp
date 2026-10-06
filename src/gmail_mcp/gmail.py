@@ -315,6 +315,7 @@ def build_mime_message(
     to: str,
     subject: str = "",
     body: str = "",
+    html_body: str | None = None,
     cc: str | None = None,
     bcc: str | None = None,
     attachment_paths: list[str] | None = None,
@@ -322,7 +323,9 @@ def build_mime_message(
     """Build an RFC 822 message and base64url-encode it the way drafts.create expects.
 
     From is left unset: Gmail fills it in as the authenticated mailbox, which is the
-    only address this token could plausibly send as.
+    only address this token could plausibly send as. When html_body is given,
+    add_alternative upgrades the message to multipart/alternative so mail clients that
+    render HTML show html_body while the plain body remains as the fallback.
     """
     message = EmailMessage()
     message["To"] = to
@@ -332,6 +335,8 @@ def build_mime_message(
         message["Bcc"] = bcc
     message["Subject"] = subject
     message.set_content(body)
+    if html_body:
+        message.add_alternative(html_body, subtype="html")
     attach_files(message, attachment_paths)
     return base64.urlsafe_b64encode(message.as_bytes()).decode().rstrip("=")
 

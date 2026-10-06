@@ -236,7 +236,9 @@ def tool_descriptions(account: str) -> dict[str, str]:
         "get_draft": f"Read one draft from {account} by id, including its composed message.",
         "create_draft": (
             f"Create a new draft in {account} with the given to/subject/body (and "
-            f"optional cc/bcc). Pass thread_id to draft a reply inside an existing "
+            f"optional cc/bcc). Pass html_body to format the email as HTML — body is "
+            f"still sent alongside it as the plain-text fallback for clients that "
+            f"don't render HTML. Pass thread_id to draft a reply inside an existing "
             f"thread. Pass attachment_paths — a list of local file paths on this "
             f"machine — to attach files; combined attachments must stay under 25MB. "
             f"This only writes to the Drafts folder — it does not send anything "
@@ -245,9 +247,11 @@ def tool_descriptions(account: str) -> dict[str, str]:
             f"send_draft with the returned draft_id."
         ),
         "update_draft": (
-            f"Replace the to/subject/body/cc/bcc/attachment_paths of an existing draft "
-            f"in {account}. attachment_paths replaces the draft's attachments entirely "
-            f"— omit it to drop any existing attachments. Still does not send anything."
+            f"Replace the to/subject/body/html_body/cc/bcc/attachment_paths of an "
+            f"existing draft in {account}. attachment_paths replaces the draft's "
+            f"attachments entirely — omit it to drop any existing attachments. "
+            f"Omitting html_body likewise drops any existing HTML part, leaving the "
+            f"draft as plain text. Still does not send anything."
         ),
         "delete_draft": f"Delete a draft in {account} by id. This cannot be undone.",
         "send_draft": (
@@ -470,6 +474,7 @@ def _dispatch(client: GmailClient, account: str, download_dir: str | None,
             to=arguments["to"],
             subject=arguments.get("subject", ""),
             body=arguments.get("body", ""),
+            html_body=arguments.get("html_body"),
             cc=arguments.get("cc"),
             bcc=arguments.get("bcc"),
             attachment_paths=attachment_paths,
@@ -484,6 +489,7 @@ def _dispatch(client: GmailClient, account: str, download_dir: str | None,
                 "to": arguments["to"],
                 "subject": arguments.get("subject", ""),
                 "body": arguments.get("body", ""),
+                "html_body": arguments.get("html_body"),
                 "cc": arguments.get("cc"),
                 "bcc": arguments.get("bcc"),
                 "attachments": [Path(p).name for p in attachment_paths or []],
@@ -497,6 +503,7 @@ def _dispatch(client: GmailClient, account: str, download_dir: str | None,
             to=arguments["to"],
             subject=arguments.get("subject", ""),
             body=arguments.get("body", ""),
+            html_body=arguments.get("html_body"),
             cc=arguments.get("cc"),
             bcc=arguments.get("bcc"),
             attachment_paths=attachment_paths,
@@ -511,6 +518,7 @@ def _dispatch(client: GmailClient, account: str, download_dir: str | None,
                 "to": arguments["to"],
                 "subject": arguments.get("subject", ""),
                 "body": arguments.get("body", ""),
+                "html_body": arguments.get("html_body"),
                 "cc": arguments.get("cc"),
                 "bcc": arguments.get("bcc"),
                 "attachments": [Path(p).name for p in attachment_paths or []],
@@ -804,6 +812,7 @@ def build_server(
         to: str,
         subject: str = "",
         body: str = "",
+        html_body: str | None = None,
         cc: str | None = None,
         bcc: str | None = None,
         thread_id: str | None = None,
@@ -815,6 +824,7 @@ def build_server(
                 "to": to,
                 "subject": subject,
                 "body": body,
+                "html_body": html_body,
                 "cc": cc,
                 "bcc": bcc,
                 "thread_id": thread_id,
@@ -827,6 +837,7 @@ def build_server(
         to: str,
         subject: str = "",
         body: str = "",
+        html_body: str | None = None,
         cc: str | None = None,
         bcc: str | None = None,
         thread_id: str | None = None,
@@ -839,6 +850,7 @@ def build_server(
                 "to": to,
                 "subject": subject,
                 "body": body,
+                "html_body": html_body,
                 "cc": cc,
                 "bcc": bcc,
                 "thread_id": thread_id,

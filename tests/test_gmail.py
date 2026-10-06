@@ -176,6 +176,26 @@ def test_build_mime_message_includes_the_given_fields():
     assert "From:" not in decoded
 
 
+def test_build_mime_message_includes_html_body_as_an_alternative():
+    raw = build_mime_message(
+        to="a@example.com", body="hello", html_body="<b>hello</b>"
+    )
+    decoded = decode_base64url(raw)
+
+    assert "Content-Type: multipart/alternative" in decoded
+    assert "Content-Type: text/html" in decoded
+    assert "hello" in decoded
+    assert "<b>hello</b>" in decoded
+
+
+def test_build_mime_message_omits_html_part_when_not_given():
+    raw = build_mime_message(to="a@example.com", body="hello")
+    decoded = decode_base64url(raw)
+
+    assert "multipart/alternative" not in decoded
+    assert "text/html" not in decoded
+
+
 def test_build_mime_message_attaches_a_local_file(tmp_path):
     file_path = tmp_path / "notes.txt"
     file_path.write_text("hello world")
