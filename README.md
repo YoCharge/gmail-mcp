@@ -1,6 +1,7 @@
 # gmail-mcp
 
-An MCP server that gives an AI agent **read-only access to Gmail, one mailbox per process.**
+An MCP server that gives an AI agent **read access, draft management, and confirmed
+sending for Gmail, one mailbox per process.**
 
 Most multi-account Gmail servers hold every account in a single process. This one does
 the opposite: each server instance is configured with exactly one mailbox and one
@@ -20,9 +21,24 @@ That choice is the whole point:
   endpoint and compares the address against the one it was configured with. Mismatch
   means exit, not a server quietly serving the wrong inbox under the right name.
 
-Read-only is enforced by the token, not by policy: the server requests
-`gmail.readonly` and nothing else, so it cannot send, reply, draft, label, archive or
-delete even if asked to.
+Composing and sending are two different tool calls, on purpose: `create_draft`,
+`create_reply_draft` and `create_forward_draft` only ever write to the Drafts folder.
+The one tool that can put a message in someone's inbox, `send_draft`, takes a
+`draft_id` rather than a fresh `to`/`subject`/`body` — so sending always means
+sending something the caller already has on screen, however that draft was composed.
+See [Sending](#sending) below for the confirmation step this depends on.
+
+It can also label, trash and spam-mark threads and individual messages
+(`label_thread`/`label_message`, `trash_thread`/`trash_message`,
+`mark_thread_spam`/`mark_message_spam`, and their undo counterparts), plus manage
+label definitions themselves (`create_label`, `update_label`, `delete_label`).
+Trashing and spam-marking are reversible — Gmail keeps trashed mail for about 30
+days, and the spam/inbox flip undoes exactly. `delete_label` is the one irreversible
+call in this group: deleting a label definition removes it from every message that
+had it, and recreating a same-named label does not relink them. There is
+deliberately no permanent-delete-a-message tool: Gmail only exposes that under the
+much broader `https://mail.google.com/` scope (full account access), which this
+server does not request.
 
 ## Install
 
@@ -72,6 +88,7 @@ Add one entry per mailbox:
         "GMAIL_CLIENT_ID": "...apps.googleusercontent.com",
         "GMAIL_CLIENT_SECRET": "...",
         "GMAIL_REFRESH_TOKEN": "1//0g...",
+        "GMAIL_CAPABILITIES": "read,draft,send",
         "GMAIL_MCP_DOWNLOAD_DIR": "/absolute/path/for/attachments"
       }
     },
@@ -83,7 +100,8 @@ Add one entry per mailbox:
         "GMAIL_ACCOUNT": "team@example.com",
         "GMAIL_CLIENT_ID": "...apps.googleusercontent.com",
         "GMAIL_CLIENT_SECRET": "...",
-        "GMAIL_REFRESH_TOKEN": "1//0g..."
+        "GMAIL_REFRESH_TOKEN": "1//0g...",
+        "GMAIL_CAPABILITIES": "read"
       }
     }
   }
@@ -104,7 +122,7 @@ Refresh tokens are passwords. Keep your real config out of version control — t
 
 ## Tools
 
-Five, each named with its mailbox in the description.
+Thirty-one, each named with its mailbox in the description.
 
 | Tool | Does |
 |---|---|
@@ -113,11 +131,63 @@ Five, each named with its mailbox in the description.
 | `get_message(message_id)` | One message |
 | `list_labels()` | Label names and ids |
 | `download_attachment(message_id, attachment_id, dest_dir?, filename?)` | Writes one attachment to disk |
+| `list_drafts(max_results=20)` | Draft ids and snippets |
+| `get_draft(draft_id)` | One draft's composed message |
+| `create_draft(to, subject?, body?, cc?, bcc?, thread_id?, attachment_paths?)` | Writes a new draft. Never sent automatically |
+| `update_draft(draft_id, to, subject?, body?, cc?, bcc?, thread_id?, attachment_paths?)` | Replaces an existing draft's contents |
+| `delete_draft(draft_id)` | Deletes a draft. Cannot be undone |
+| `send_draft(draft_id)` | Sends an existing draft. **Irreversible** — see [Sending](#sending) |
+| `create_reply_draft(message_id, body?, reply_all?, to?, cc?, bcc?, attachment_paths?)` | Drafts a threaded reply to a message |
+| `create_forward_draft(message_id, to, body?, cc?, bcc?, attachment_paths?)` | Drafts a forward quoting the original. Original's attachments aren't carried over automatically — download them first and pass the local paths via `attachment_paths` |
+| `label_thread(thread_id, label_ids)` | Adds one or more labels to a thread |
+| `unlabel_thread(thread_id, label_ids)` | Removes one or more labels from a thread |
+| `trash_thread(thread_id)` | Moves a thread to Trash. Reversible — recover with `untrash_thread` |
+| `untrash_thread(thread_id)` | Recovers a trashed thread |
+| `apply_sensitive_thread_label(thread_id, label_option)` | `label_option`: `TRASH` (= `trash_thread`) or `SPAM` (= `mark_thread_spam`) |
+| `mark_thread_spam(thread_id)` | Marks a thread as spam. Reversible — recover with `unmark_thread_spam` |
+| `unmark_thread_spam(thread_id)` | Undoes `mark_thread_spam` |
+| `label_message(message_id, label_ids)` | Adds one or more labels to a single message |
+| `unlabel_message(message_id, label_ids)` | Removes one or more labels from a single message |
+| `update_message_labels(message_id, add_label_ids?, remove_label_ids?)` | Adds and removes labels on a message in one call |
+| `apply_sensitive_message_label(message_id, label_option)` | `label_option`: `TRASH` (= `trash_message`) or `SPAM` (= `mark_message_spam`) |
+| `trash_message(message_id)` | Moves a single message to Trash. Reversible — recover with `untrash_message` |
+| `untrash_message(message_id)` | Recovers a trashed message |
+| `mark_message_spam(message_id)` | Marks a single message as spam. Reversible — recover with `unmark_message_spam` |
+| `unmark_message_spam(message_id)` | Undoes `mark_message_spam` |
+| `create_label(name, label_list_visibility?, message_list_visibility?)` | Creates a new label |
+| `update_label(label_id, name?, label_list_visibility?, message_list_visibility?)` | Renames/reconfigures an existing label |
+| `delete_label(label_id)` | Deletes a label definition. **Cannot be undone** — every message loses it |
 
 `download_attachment` requires a destination: either `dest_dir` on the call, or
 `GMAIL_MCP_DOWNLOAD_DIR` in the environment. It will not guess a directory. Filenames
 supplied by the sender are reduced to their final path component, so an attachment
 named `../../.ssh/authorized_keys` writes as `authorized_keys`.
+
+`attachment_paths` (on `create_draft`, `update_draft`, `create_reply_draft` and
+`create_forward_draft`) takes a list of local file paths on the machine running the
+server. Each file is read from disk and attached under its own filename; combined
+attachments must stay under 25MB, since that's Gmail's limit for a draft created
+through this non-resumable endpoint. `update_draft` replaces a draft's attachments
+entirely — omit `attachment_paths` to drop whatever was there before.
+
+## Sending
+
+Composing and sending are deliberately two separate tools:
+
+1. `create_draft`, `update_draft`, `create_reply_draft` or `create_forward_draft`
+   writes to the Drafts folder and echoes back the exact `to`/`subject`/`body` (plus
+   `cc`/`bcc`) it just wrote, together with a `draft_id`.
+2. `send_draft(draft_id)` is the only call in this server that can put a message in
+   someone's inbox. It takes just the id — not the content — so there is no way to
+   compose and send in a single tool call, no matter which of the four ways was used
+   to compose it.
+
+That split exists so an agent (or the human driving it) always has a concrete draft
+to review between "write this email" and "send it". Nothing here enforces that a human
+actually looks at step 1's output before step 2 runs — that enforcement is the calling
+agent's and MCP client's job (e.g. requiring approval before `send_draft` specifically)
+— but the tool boundary makes that enforcement possible to add, where a single
+`send_message(to, subject, body)` tool would not.
 
 ## Untrusted content
 
@@ -135,7 +205,29 @@ accordingly.
 | `GMAIL_CLIENT_ID` | yes | OAuth client id |
 | `GMAIL_CLIENT_SECRET` | yes | OAuth client secret |
 | `GMAIL_REFRESH_TOKEN` | yes | From `gmail-mcp-auth`, for this mailbox |
+| `GMAIL_CAPABILITIES` | yes | `read`, `read,draft`, or `read,draft,send` — see [Capabilities](#capabilities). No default |
 | `GMAIL_MCP_DOWNLOAD_DIR` | no | Fallback directory for `download_attachment` |
+
+## Capabilities
+
+`GMAIL_CAPABILITIES` controls which tools this process even *registers* — not just
+which it can use. A mailbox configured with `read` never advertises `send_draft`,
+`trash_thread`, or any other write tool to the client; they are simply absent from
+the tool list, the same way a server with no credential for a mailbox cannot read it.
+
+The three tiers are cumulative, since each depends on the one before it:
+
+| Tier | Unlocks |
+|---|---|
+| `read` | Search, read threads/messages/drafts, list labels, download attachments |
+| `read,draft` | + create/update/delete drafts (including replies and forwards), label, trash, untrash, and mark/unmark spam |
+| `read,draft,send` | + `send_draft` — the one tool that can put a message in someone's inbox |
+
+There is no default: an unset or invalid value refuses to start, the same as a
+missing `GMAIL_ACCOUNT`. A mailbox that only ever needs to be read from — a shared
+support inbox a bot drafts into but a human sends from, say — should be configured
+with `GMAIL_CAPABILITIES=read,draft` so `send_draft` is never on its tool list at all,
+rather than relying on a model to not call it.
 
 ## Licence
 

@@ -99,9 +99,20 @@ Pick the user type:
 > everything is broken". If you must use External, publish the app to move out of
 > Testing, or accept re-authorizing weekly.
 
-Add the scope `https://www.googleapis.com/auth/gmail.readonly`. That is the only
-scope this server uses — it cannot send, reply, draft, label or delete, and requesting
-nothing further is what makes that structural rather than a promise.
+Add all three scopes:
+
+- `https://www.googleapis.com/auth/gmail.readonly`
+- `https://www.googleapis.com/auth/gmail.compose`
+- `https://www.googleapis.com/auth/gmail.modify`
+
+Those are the only scopes this server uses. `gmail.compose` is what lets it create,
+update, delete and send drafts (including replies and forwards, which are also just
+drafts). Composing and sending are still two separate tool calls — see the README's
+[Sending](../README.md#sending) section — so there is no single call that both writes
+and sends a message. `gmail.modify` is what lets it label and trash/untrash threads.
+There is deliberately no permanent-delete tool: Gmail only allows that under the much
+broader `https://mail.google.com/` scope (full account access), which is not
+requested here.
 
 ## 4. Create the OAuth client and get the client ID and secret
 
@@ -203,7 +214,13 @@ Repeat per mailbox. Each run produces its own refresh token.
 ## 6. Register the servers
 
 One entry per mailbox, each with its own `GMAIL_ACCOUNT` and `GMAIL_REFRESH_TOKEN`,
-sharing the same client ID and secret. See the README for a full example.
+sharing the same client ID and secret. Also set `GMAIL_CAPABILITIES` per mailbox —
+there is no default, and it decides which tools this process even registers (see the
+README's [Capabilities](../README.md#capabilities) section). A mailbox that should
+only ever be read from, or only drafted into by a human-sends-later workflow, should
+not be given `send`.
+
+See the README for a full example.
 
 Keep that config file out of version control. A refresh token opens the mailbox until
 it is revoked.
@@ -215,6 +232,7 @@ Before wiring it into a client, check the credentials directly:
 ```bash
 export GMAIL_ACCOUNT=you@example.com
 export GMAIL_REFRESH_TOKEN='1//0g...'      # from step 5
+export GMAIL_CAPABILITIES=read,draft,send
 # GMAIL_CLIENT_ID and GMAIL_CLIENT_SECRET already exported from step 4
 
 gmail-mcp
@@ -223,7 +241,7 @@ gmail-mcp
 A working setup prints one line to stderr and then waits for MCP traffic on stdin:
 
 ```
-gmail-mcp: serving you@example.com (read-only)
+gmail-mcp: serving you@example.com (capabilities: draft,read,send)
 ```
 
 That line means the refresh token was exchanged **and** the mailbox identity was
@@ -255,6 +273,11 @@ The refresh token is dead — revoked, the account's password changed, or it is 
 External app still in Testing and seven days have passed (step 3). Re-run
 `gmail-mcp-auth`.
 
+**`GMAIL_CAPABILITIES is not set`** or **`is not a recognised capability set`**
+Set it to one of `read`, `read,draft`, or `read,draft,send` (step 6). There is no
+default, and partial tiers like `send` alone or `read,send` are rejected — each tier
+implies the ones before it.
+
 **`Refresh token mismatch: GMAIL_ACCOUNT is 'a@example.com' but this token opens 'b@example.com'`**
 A token is in the wrong server entry. This is the startup check doing its job. Swap
 them, or re-run `gmail-mcp-auth` for the right mailbox.
@@ -269,3 +292,9 @@ new Desktop client.
 
 **`403 accessNotConfigured`**
 Same as the first entry: the Gmail API is not enabled on the project.
+
+**A tool fails with `insufficient authentication scopes` even though other tools work**
+The refresh token was issued before `gmail.compose` or `gmail.modify` was added to
+this flow (draft tools need `gmail.compose`; `label_thread`/`trash_thread`/etc. need
+`gmail.modify`). Re-run `gmail-mcp-auth you@example.com` to get a new refresh token
+covering all three scopes, and update that mailbox's `GMAIL_REFRESH_TOKEN`.

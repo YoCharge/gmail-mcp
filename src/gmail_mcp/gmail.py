@@ -1,13 +1,23 @@
 """A thin Gmail REST client.
 
-Only the read surface is implemented. There is deliberately no send, reply, draft,
-label or trash call here — and the gmail.readonly token this client carries could not
-perform them anyway.
+Read surface, draft management (including replying and forwarding, both compose-only
+via create_draft), and labeling/trashing/spam for both threads and individual
+messages, plus label definitions (create/update/delete). Still only one way to
+actually send anything — send_draft, by draft id — so replying and forwarding pass
+through the same confirm-before-send gate as every other draft. Trash and spam are
+reversible pairs (Gmail keeps trashed mail ~30 days; untrash/unmark undo them
+exactly); there is deliberately no permanent-delete-a-message call, which Gmail only
+allows under the much broader https://mail.google.com/ scope. Deleting a label
+definition (delete_label) is the one irreversible call here — every message loses
+that label, and recreating a same-named label does not relink them.
 """
 
 from __future__ import annotations
 
 import base64
+import mimetypes
+from email.message import EmailMessage
+from pathlib import Path
 from typing import Any, Iterator
 
 import httpx
@@ -15,6 +25,10 @@ import httpx
 API_ROOT = "https://gmail.googleapis.com/gmail/v1/users/me"
 
 DEFAULT_TIMEOUT = 30.0
+
+# Gmail's drafts.create/update reject a message over 25MB; anything larger needs the
+# resumable upload endpoint, which this client does not implement.
+MAX_ATTACHMENTS_BYTES = 25 * 1024 * 1024
 
 
 class GmailError(RuntimeError):
@@ -49,6 +63,23 @@ class GmailClient:
 
         return response.json()
 
+    def _write(self, method: str, path: str, json_body: dict | None = None) -> dict:
+        """POST/PUT/DELETE with the same one-retry-after-refresh behaviour as _get."""
+        url = f"{API_ROOT}{path}"
+
+        token = self._credentials.access_token(self._http)
+        response = self._http.request(method, url, json=json_body, headers=_bearer(token))
+
+        if response.status_code == 401:
+            token = self._credentials.refresh(self._http)
+            response = self._http.request(method, url, json=json_body, headers=_bearer(token))
+
+        if response.status_code >= 400:
+            raise GmailError(_describe_failure(response))
+
+        # DELETE returns 204 with an empty body; nothing else here does.
+        return response.json() if response.content else {}
+
     # -- read surface ------------------------------------------------------
 
     def get_profile(self) -> dict:
@@ -75,6 +106,160 @@ class GmailClient:
         payload = self._get(f"/messages/{message_id}/attachments/{attachment_id}")
         return decode_base64url_bytes(payload.get("data", ""))
 
+    # -- draft management ----------------------------------------------------
+    #
+    # Composing and sending are two different calls on purpose. create_draft only
+    # ever writes to the Drafts folder; send_draft is the one call in this entire
+    # client that can put a message in someone's inbox, and it takes a draft_id
+    # rather than a to/subject/body, so the caller must already have the exact
+    # content on screen (from create_draft's or get_draft's response) before they
+    # can send it — there is no path that composes and sends in one step.
+
+    def list_drafts(self, max_results: int = 20) -> list[dict]:
+        payload = self._get("/drafts", params={"maxResults": max(1, min(max_results, 500))})
+        return payload.get("drafts", [])
+
+    def get_draft(self, draft_id: str) -> dict:
+        return self._get(f"/drafts/{draft_id}", params={"format": "full"})
+
+    def create_draft(self, raw_message: str, thread_id: str | None = None) -> dict:
+        message: dict[str, Any] = {"raw": raw_message}
+        if thread_id:
+            message["threadId"] = thread_id
+        return self._write("POST", "/drafts", {"message": message})
+
+    def update_draft(self, draft_id: str, raw_message: str, thread_id: str | None = None) -> dict:
+        message: dict[str, Any] = {"raw": raw_message}
+        if thread_id:
+            message["threadId"] = thread_id
+        return self._write("PUT", f"/drafts/{draft_id}", {"message": message})
+
+    def delete_draft(self, draft_id: str) -> None:
+        self._write("DELETE", f"/drafts/{draft_id}")
+
+    def send_draft(self, draft_id: str) -> dict:
+        """Send an existing draft. Irreversible — the message leaves the mailbox."""
+        return self._write("POST", "/drafts/send", {"id": draft_id})
+
+    # -- thread labeling and trash --------------------------------------------
+    #
+    # trash/untrash are a reversible pair: Gmail keeps trashed mail ~30 days, and
+    # untrash_thread undoes trash_thread exactly. There is no permanent-delete call;
+    # Gmail only exposes that under the much broader https://mail.google.com/ scope.
+
+    def label_thread(self, thread_id: str, label_ids: list[str]) -> dict:
+        return self._write("POST", f"/threads/{thread_id}/modify", {"addLabelIds": label_ids})
+
+    def unlabel_thread(self, thread_id: str, label_ids: list[str]) -> dict:
+        return self._write("POST", f"/threads/{thread_id}/modify", {"removeLabelIds": label_ids})
+
+    def trash_thread(self, thread_id: str) -> dict:
+        return self._write("POST", f"/threads/{thread_id}/trash")
+
+    def mark_thread_spam(self, thread_id: str) -> dict:
+        """Flip SPAM on and INBOX off. Undo with unmark_thread_spam."""
+        return self._write(
+            "POST", f"/threads/{thread_id}/modify",
+            {"addLabelIds": ["SPAM"], "removeLabelIds": ["INBOX"]},
+        )
+
+    def unmark_thread_spam(self, thread_id: str) -> dict:
+        """Flip INBOX on and SPAM off — undoes mark_thread_spam exactly."""
+        return self._write(
+            "POST", f"/threads/{thread_id}/modify",
+            {"addLabelIds": ["INBOX"], "removeLabelIds": ["SPAM"]},
+        )
+
+    def untrash_thread(self, thread_id: str) -> dict:
+        return self._write("POST", f"/threads/{thread_id}/untrash")
+
+    # -- message labeling and trash -------------------------------------------
+    #
+    # Same shape as the thread-level calls above, one message at a time: trashing
+    # or spam-marking a single message does not touch the rest of its thread.
+
+    def label_message(self, message_id: str, label_ids: list[str]) -> dict:
+        return self._write("POST", f"/messages/{message_id}/modify", {"addLabelIds": label_ids})
+
+    def unlabel_message(self, message_id: str, label_ids: list[str]) -> dict:
+        return self._write(
+            "POST", f"/messages/{message_id}/modify", {"removeLabelIds": label_ids}
+        )
+
+    def update_message_labels(
+        self,
+        message_id: str,
+        add_label_ids: list[str] | None = None,
+        remove_label_ids: list[str] | None = None,
+    ) -> dict:
+        """Add and remove labels in the same call, unlike label_message/unlabel_message."""
+        body: dict[str, Any] = {}
+        if add_label_ids:
+            body["addLabelIds"] = add_label_ids
+        if remove_label_ids:
+            body["removeLabelIds"] = remove_label_ids
+        return self._write("POST", f"/messages/{message_id}/modify", body)
+
+    def trash_message(self, message_id: str) -> dict:
+        return self._write("POST", f"/messages/{message_id}/trash")
+
+    def untrash_message(self, message_id: str) -> dict:
+        return self._write("POST", f"/messages/{message_id}/untrash")
+
+    def mark_message_spam(self, message_id: str) -> dict:
+        """Flip SPAM on and INBOX off. Undo with unmark_message_spam."""
+        return self._write(
+            "POST", f"/messages/{message_id}/modify",
+            {"addLabelIds": ["SPAM"], "removeLabelIds": ["INBOX"]},
+        )
+
+    def unmark_message_spam(self, message_id: str) -> dict:
+        """Flip INBOX on and SPAM off — undoes mark_message_spam exactly."""
+        return self._write(
+            "POST", f"/messages/{message_id}/modify",
+            {"addLabelIds": ["INBOX"], "removeLabelIds": ["SPAM"]},
+        )
+
+    # -- label definitions -----------------------------------------------------
+    #
+    # Creating, renaming or deleting a label definition itself, as distinct from
+    # applying one to a message/thread. Deleting one is NOT reversible: every
+    # message loses it, and recreating a same-named label does not relink them.
+
+    def create_label(
+        self,
+        name: str,
+        label_list_visibility: str = "labelShow",
+        message_list_visibility: str = "show",
+    ) -> dict:
+        return self._write(
+            "POST", "/labels",
+            {
+                "name": name,
+                "labelListVisibility": label_list_visibility,
+                "messageListVisibility": message_list_visibility,
+            },
+        )
+
+    def update_label(
+        self,
+        label_id: str,
+        name: str | None = None,
+        label_list_visibility: str | None = None,
+        message_list_visibility: str | None = None,
+    ) -> dict:
+        body: dict[str, Any] = {}
+        if name is not None:
+            body["name"] = name
+        if label_list_visibility is not None:
+            body["labelListVisibility"] = label_list_visibility
+        if message_list_visibility is not None:
+            body["messageListVisibility"] = message_list_visibility
+        return self._write("PATCH", f"/labels/{label_id}", body)
+
+    def delete_label(self, label_id: str) -> None:
+        self._write("DELETE", f"/labels/{label_id}")
+
 
 def _bearer(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
@@ -96,6 +281,156 @@ def _describe_failure(response: httpx.Response) -> str:
 # Gmail nests message bodies in a parts tree and base64url-encodes every leaf.
 # These are pure functions so they can be tested against captured payloads without
 # any network involved.
+
+
+def attach_files(message: EmailMessage, attachment_paths: list[str] | None) -> None:
+    """Read local files from disk and attach them to `message` in place.
+
+    Filenames are taken from each path's final component. `add_attachment` after
+    `set_content` turns the message into multipart/mixed automatically.
+    """
+    if not attachment_paths:
+        return
+
+    total_bytes = 0
+    for raw_path in attachment_paths:
+        path = Path(raw_path).expanduser()
+        if not path.is_file():
+            raise ValueError(f"Attachment not found: {path}")
+
+        data = path.read_bytes()
+        total_bytes += len(data)
+        if total_bytes > MAX_ATTACHMENTS_BYTES:
+            raise ValueError(
+                f"Attachments exceed Gmail's {MAX_ATTACHMENTS_BYTES // (1024 * 1024)}MB "
+                f"limit for a single message."
+            )
+
+        mime_type, _ = mimetypes.guess_type(path.name)
+        maintype, _, subtype = (mime_type or "application/octet-stream").partition("/")
+        message.add_attachment(data, maintype=maintype, subtype=subtype, filename=path.name)
+
+
+def build_mime_message(
+    to: str,
+    subject: str = "",
+    body: str = "",
+    html_body: str | None = None,
+    cc: str | None = None,
+    bcc: str | None = None,
+    attachment_paths: list[str] | None = None,
+) -> str:
+    """Build an RFC 822 message and base64url-encode it the way drafts.create expects.
+
+    From is left unset: Gmail fills it in as the authenticated mailbox, which is the
+    only address this token could plausibly send as. When html_body is given,
+    add_alternative upgrades the message to multipart/alternative so mail clients that
+    render HTML show html_body while the plain body remains as the fallback.
+    """
+    message = EmailMessage()
+    message["To"] = to
+    if cc:
+        message["Cc"] = cc
+    if bcc:
+        message["Bcc"] = bcc
+    message["Subject"] = subject
+    message.set_content(body)
+    if html_body:
+        message.add_alternative(html_body, subtype="html")
+    attach_files(message, attachment_paths)
+    return base64.urlsafe_b64encode(message.as_bytes()).decode().rstrip("=")
+
+
+def reply_subject(subject: str) -> str:
+    if not subject:
+        return "Re:"
+    return subject if subject.lower().startswith("re:") else f"Re: {subject}"
+
+
+def forward_subject(subject: str) -> str:
+    if not subject:
+        return "Fwd:"
+    return subject if subject.lower().startswith("fwd:") else f"Fwd: {subject}"
+
+
+def build_reply_mime_message(
+    original: dict,
+    body: str,
+    to: str,
+    cc: str | None = None,
+    bcc: str | None = None,
+    attachment_paths: list[str] | None = None,
+) -> str:
+    """Build a reply threaded to `original` via In-Reply-To/References.
+
+    The caller is also expected to pass the original's threadId to create_draft:
+    that's what groups the reply in Gmail's own UI. These headers are what other
+    mail clients thread on, so both are set.
+    """
+    message_id = header(original, "Message-ID") or header(original, "Message-Id")
+    references = " ".join(part for part in (header(original, "References"), message_id) if part)
+
+    message = EmailMessage()
+    message["To"] = to
+    if cc:
+        message["Cc"] = cc
+    if bcc:
+        message["Bcc"] = bcc
+    message["Subject"] = reply_subject(header(original, "Subject"))
+    if message_id:
+        message["In-Reply-To"] = message_id
+    if references:
+        message["References"] = references
+    message.set_content(body)
+    attach_files(message, attachment_paths)
+    return base64.urlsafe_b64encode(message.as_bytes()).decode().rstrip("=")
+
+
+def build_forward_mime_message(
+    original: dict,
+    body: str,
+    to: str,
+    cc: str | None = None,
+    bcc: str | None = None,
+    attachment_paths: list[str] | None = None,
+) -> str:
+    """Build a forward: a new message quoting `original`'s headers and body.
+
+    Attachments on the original are not carried over automatically — forwarding one
+    would require downloading it first (download_attachment) and passing its local
+    path back in via attachment_paths.
+    """
+    quoted = (
+        "---------- Forwarded message ----------\n"
+        f"From: {header(original, 'From')}\n"
+        f"Date: {header(original, 'Date')}\n"
+        f"Subject: {header(original, 'Subject')}\n"
+        f"To: {header(original, 'To')}\n\n"
+        f"{extract_body(original)}"
+    )
+    full_body = f"{body}\n\n{quoted}" if body else quoted
+
+    message = EmailMessage()
+    message["To"] = to
+    if cc:
+        message["Cc"] = cc
+    if bcc:
+        message["Bcc"] = bcc
+    message["Subject"] = forward_subject(header(original, "Subject"))
+    message.set_content(full_body)
+    attach_files(message, attachment_paths)
+    return base64.urlsafe_b64encode(message.as_bytes()).decode().rstrip("=")
+
+
+def other_recipients(original: dict, account: str) -> str:
+    """Everyone on `original`'s To/Cc except `account`, comma-joined — for reply-all."""
+    addresses = []
+    for field in (header(original, "To"), header(original, "Cc")):
+        for part in field.split(","):
+            part = part.strip()
+            if part and account.lower() not in part.lower():
+                addresses.append(part)
+    return ", ".join(addresses)
 
 
 def decode_base64url(data: str) -> str:
