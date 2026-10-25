@@ -49,3 +49,30 @@ def test_a_non_json_body_does_not_crash_the_explanation():
     raw = httpx.Response(502, text="<html>bad gateway</html>",
                          request=httpx.Request("GET", "https://example.com"))
     assert "502" in _describe_profile_failure(raw)
+
+
+# --- least privilege: the consent screen asks only for what the mailbox's tier uses ---
+
+import pytest
+
+from gmail_mcp.cli_auth import scopes_for
+from gmail_mcp.server import ConfigError
+
+READONLY = "https://www.googleapis.com/auth/gmail.readonly"
+COMPOSE = "https://www.googleapis.com/auth/gmail.compose"
+MODIFY = "https://www.googleapis.com/auth/gmail.modify"
+
+
+def test_a_read_mailbox_asks_for_read_only():
+    assert scopes_for("read") == READONLY
+
+
+def test_draft_and_send_mailboxes_ask_for_compose_and_modify():
+    for tier in ("read,draft", "read,draft,send"):
+        assert set(scopes_for(tier).split()) == {READONLY, COMPOSE, MODIFY}
+
+
+def test_no_or_unknown_tier_is_refused_rather_than_guessed():
+    for bad in ("", "send", "write"):
+        with pytest.raises(ConfigError):
+            scopes_for(bad)

@@ -27,11 +27,28 @@ AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 # add/remove labels and trash/untrash threads; it does NOT grant permanent delete,
 # which Gmail only allows under the much broader https://mail.google.com/ scope —
 # deliberately not requested here.
-SCOPE = (
-    "https://www.googleapis.com/auth/gmail.readonly "
-    "https://www.googleapis.com/auth/gmail.compose "
-    "https://www.googleapis.com/auth/gmail.modify"
+READONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
+WRITE_SCOPES = (
+    "https://www.googleapis.com/auth/gmail.compose",
+    "https://www.googleapis.com/auth/gmail.modify",
 )
+
+
+def scopes_for(capabilities: str) -> str:
+    """The OAuth scopes a mailbox's capability tier actually uses — least privilege.
+
+    A `read` mailbox is granted gmail.readonly only, so its token cannot draft, send, label or trash even if the
+    server's own tier gate were bypassed. The draft and send tiers add compose (drafts, sending a draft) and modify
+    (labels, trash). Takes the same value as the server's GMAIL_CAPABILITIES and, like the server, has no default.
+    """
+    from .server import parse_capabilities  # same validation as the server: one of the cumulative tiers, or refuse
+
+    tier = parse_capabilities(capabilities) if capabilities.strip() else None
+    if tier is None:
+        from .server import ConfigError
+        raise ConfigError("GMAIL_CAPABILITIES is not set. Set the mailbox's tier (read / read,draft / read,draft,send) "
+                          "so the consent screen asks only for what that tier uses.")
+    return READONLY_SCOPE if tier == frozenset({"read"}) else " ".join((READONLY_SCOPE, *WRITE_SCOPES))
 PROFILE_URL = "https://gmail.googleapis.com/gmail/v1/users/me/profile"
 
 # Served the moment the authorization code arrives, which is BEFORE the token
@@ -76,7 +93,7 @@ def _free_port() -> int:
         return sock.getsockname()[1]
 
 
-def authorize(account: str, client_id: str, client_secret: str) -> str:
+def authorize(account: str, client_id: str, client_secret: str, scope: str) -> str:
     """Run the consent flow and return a refresh token for `account`."""
     port = _free_port()
     redirect_uri = f"http://127.0.0.1:{port}"
@@ -87,7 +104,7 @@ def authorize(account: str, client_id: str, client_secret: str) -> str:
             "client_id": client_id,
             "redirect_uri": redirect_uri,
             "response_type": "code",
-            "scope": SCOPE,
+            "scope": scope,
             # offline + consent together are what guarantee a refresh token comes back.
             # Without prompt=consent, a mailbox that has authorized before gets an
             # access token only, and the flow appears to succeed while returning nothing.
@@ -216,7 +233,14 @@ def run() -> None:
         sys.exit(2)
 
     try:
-        refresh_token = authorize(account, client_id, client_secret)
+        scope = scopes_for(os.environ.get("GMAIL_CAPABILITIES", ""))
+    except Exception as exc:  # ConfigError: no tier, or not a recognised one
+        print(f"\n{exc}", file=sys.stderr)
+        sys.exit(2)
+    print(f"Requesting: {'read-only' if ' ' not in scope else 'read, compose and modify'} access.")
+
+    try:
+        refresh_token = authorize(account, client_id, client_secret, scope)
     except AuthError as exc:
         print(f"\nFailed: {exc}", file=sys.stderr)
         sys.exit(1)
