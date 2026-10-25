@@ -191,11 +191,16 @@ from step 5 differs.
 
 ## 5. Authorize each mailbox
 
-With `GMAIL_CLIENT_ID` and `GMAIL_CLIENT_SECRET` exported:
+With `GMAIL_CLIENT_ID` and `GMAIL_CLIENT_SECRET` exported, and `GMAIL_CAPABILITIES` set to the tier
+this mailbox will run with:
 
 ```bash
-gmail-mcp-auth you@example.com
+GMAIL_CAPABILITIES=read gmail-mcp-auth you@example.com
 ```
+
+The token is granted only what that tier uses — `read` is read-only (`gmail.readonly`); the draft
+and send tiers also get `gmail.compose` and `gmail.modify`. There is no default: without
+`GMAIL_CAPABILITIES` the command refuses rather than guessing.
 
 A browser opens. **Sign in as that mailbox** and approve. If several Google accounts
 are already signed in, pick carefully — this is the easiest mistake to make here.
@@ -294,7 +299,7 @@ new Desktop client.
 Same as the first entry: the Gmail API is not enabled on the project.
 
 **A tool fails with `insufficient authentication scopes` even though other tools work**
-The refresh token was issued before `gmail.compose` or `gmail.modify` was added to
-this flow (draft tools need `gmail.compose`; `label_thread`/`trash_thread`/etc. need
-`gmail.modify`). Re-run `gmail-mcp-auth you@example.com` to get a new refresh token
-covering all three scopes, and update that mailbox's `GMAIL_REFRESH_TOKEN`.
+The token was issued for a lower tier than the server now runs (for example minted with
+`GMAIL_CAPABILITIES=read`, which grants `gmail.readonly` only, while the server runs `read,draft`).
+Re-run `GMAIL_CAPABILITIES=<the server's tier> gmail-mcp-auth you@example.com` and update that
+mailbox's `GMAIL_REFRESH_TOKEN`.

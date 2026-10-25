@@ -64,11 +64,14 @@ One Google Cloud project and OAuth client covers every mailbox — full walkthro
 ```bash
 export GMAIL_CLIENT_ID=...
 export GMAIL_CLIENT_SECRET=...
+export GMAIL_CAPABILITIES=read      # the same tier this mailbox's server will run with
 
 gmail-mcp-auth you@example.com
 ```
 
-A browser opens, you sign in as that mailbox, and a refresh token is printed. It is
+The consent screen asks only for what that tier uses: `read` grants **read-only** access;
+`read,draft` and `read,draft,send` add compose and modify. A browser opens, you sign in as
+that mailbox, and a refresh token is printed. It is
 verified against the address you asked for before it is shown, so signing in as the
 wrong account fails immediately rather than months later.
 
